@@ -31,7 +31,7 @@ class TypescriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     importList.toList.map(i => s"import ${i} from './${i}';").mkString(" ")
   }
 
-  override val translator = new JavaScriptTranslator(typeProvider)
+  override val translator = new JavaScriptTranslator(typeProvider, importList)
 
   override def indent: String = "  "
 
@@ -56,7 +56,7 @@ class TypescriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts(s"export as namespace ${type2class(name)};")
   }
 
-  override def opaqueClassDeclaration(classSpec: ClassSpec): Unit = {
+  def opaqueClassDeclaration(classSpec: ClassSpec): Unit = {
     val className = type2class(classSpec.name.head)
     importList.add(className)
   }
@@ -247,17 +247,19 @@ class TypescriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
 
   override def condIfFooter(expr: expr): Unit = {}
 
-  override def condRepeatEosHeader(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw): Unit = {}
+  override def condRepeatEosHeader(id: Identifier, io: String, dataType: DataType): Unit = {}
 
   override def condRepeatEosFooter: Unit = {}
 
-  override def condRepeatExprHeader(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw, repeatExpr: expr): Unit = {}
+  override def condRepeatExprHeader(id: Identifier, io: String, dataType: DataType, repeatExpr: expr): Unit = {}
 
   override def condRepeatExprFooter: Unit = {}
 
-  override def condRepeatUntilHeader(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw, repeatExpr: expr): Unit = {}
+  override def condRepeatUntilHeader(id: Identifier, io: String, dataType: DataType, repeatExpr: expr): Unit = {}
 
-  override def condRepeatUntilFooter(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw, repeatExpr: expr): Unit = {}
+  override def condRepeatUntilFooter(id: Identifier, io: String, dataType: DataType, repeatExpr: expr): Unit = {}
+
+  override def condRepeatInitAttr(id: Identifier, dataType: DataType): Unit = {}
 
   override def attrProcess(proc: ProcessExpr, varSrc: Identifier, varDest: Identifier, rep: RepeatSpec): Unit = {}
 
@@ -299,7 +301,7 @@ class TypescriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
 
   override def parseExpr(dataType: DataType, assignType: DataType, io: String, defEndian: Option[FixedEndian]): String = ""
 
-  override def bytesPadTermExpr(expr0: String, padRight: Option[Int], terminator: Option[Int], include: Boolean): String = ""
+  override def bytesPadTermExpr(expr0: String, padRight: Option[Int], terminator: Option[Seq[Byte]], include: Boolean): String = ""
 
   /**
    * Determines if this particular implementation of switches would be ok with true
