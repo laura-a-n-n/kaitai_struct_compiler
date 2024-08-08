@@ -8,7 +8,7 @@ import io.kaitai.struct.exprlang.Ast.expr
 import io.kaitai.struct.exprlang.{Ast, Expressions}
 import io.kaitai.struct.problems.KSYParseError
 
-import scala.collection.JavaConversions._
+import scala.collection.immutable.SortedMap
 
 case class ConditionalSpec(ifExpr: Option[Ast.expr], repeat: RepeatSpec)
 
@@ -83,7 +83,7 @@ case class YamlAttrArgs(
   size: Option[Ast.expr],
   sizeEos: Boolean,
   encoding: Option[String],
-  terminator: Option[Int],
+  terminator: Option[Seq[Byte]],
   include: Boolean,
   consume: Boolean,
   eosError: Boolean,
@@ -167,25 +167,24 @@ object AttrSpec {
       fromYaml2(srcMap, path, metaDef, id)
     } catch {
       case (epe: Expressions.ParseException) =>
-        throw KSYParseError.expression(epe, path)
+        throw KSYParseError.expression(epe, path ++ List("type"))
     }
   }
 
   def fromYaml2(srcMap: Map[String, Any], path: List[String], metaDef: MetaSpec, id: Identifier): AttrSpec = {
     val doc = DocSpec.fromYaml(srcMap, path)
-    val process = ProcessExpr.fromStr(ParseUtils.getOptValueStr(srcMap, "process", path), path)
-    // TODO: add proper path propagation
+    val process = ProcessExpr.fromStr(ParseUtils.getOptValueStr(srcMap, "process", path), path ++ List("process"))
     val contents = srcMap.get("contents").map(parseContentSpec(_, path ++ List("contents")))
     val size = ParseUtils.getOptValueExpression(srcMap, "size", path)
     val sizeEos = ParseUtils.getOptValueBool(srcMap, "size-eos", path).getOrElse(false)
     val ifExpr = ParseUtils.getOptValueExpression(srcMap, "if", path)
     val encoding = ParseUtils.getOptValueStr(srcMap, "encoding", path)
-    val terminator = ParseUtils.getOptValueInt(srcMap, "terminator", path)
+    val terminator = ParseUtils.getOptValueByte(srcMap, "terminator", path).map(value => Seq(value.toByte))
     val consume = ParseUtils.getOptValueBool(srcMap, "consume", path).getOrElse(true)
     val include = ParseUtils.getOptValueBool(srcMap, "include", path).getOrElse(false)
     val eosError = ParseUtils.getOptValueBool(srcMap, "eos-error", path).getOrElse(true)
-    val padRight = ParseUtils.getOptValueInt(srcMap, "pad-right", path)
-    val enum = ParseUtils.getOptValueStr(srcMap, "enum", path)
+    val padRight = ParseUtils.getOptValueByte(srcMap, "pad-right", path)
+    val enumOpt = ParseUtils.getOptValueStr(srcMap, "enum", path)
     val parent = ParseUtils.getOptValueExpression(srcMap, "parent", path)
     val valid = srcMap.get("valid").map(ValidationSpec.fromYaml(_, path ++ List("valid")))
 
@@ -205,7 +204,7 @@ object AttrSpec {
     val yamlAttrArgs = YamlAttrArgs(
       size, sizeEos,
       encoding, terminator, include, consume, eosError, padRight,
-      contents, enum, parent, process
+      contents, enumOpt, parent, process
     )
 
     // Unfortunately, this monstrous match can't rewritten in simpler way due to Java type erasure
@@ -222,7 +221,7 @@ object AttrSpec {
             )
           case switchMap: Map[Any, Any] =>
             val switchMapStr = ParseUtils.anyMapToStrMap(switchMap, path)
-            parseSwitch(switchMapStr, path, metaDef, yamlAttrArgs)
+            parseSwitch(switchMapStr, path ++ List("type"), metaDef, yamlAttrArgs)
           case unknown =>
             throw KSYParseError.withText(s"expected map or string, found $unknown", path ++ List("type"))
         }
@@ -299,7 +298,7 @@ object AttrSpec {
     // If we have size defined, and we don't have any "else" case already, add
     // an implicit "else" case that will at least catch everything else as
     // "untyped" byte array of given size
-    val addCases: Map[Ast.expr, DataType] = if (cases.containsKey(SwitchType.ELSE_CONST)) {
+    val addCases: Map[Ast.expr, DataType] = if (cases.contains(SwitchType.ELSE_CONST)) {
       Map()
     } else {
       (arg.size, arg.sizeEos) match {
@@ -314,6 +313,6 @@ object AttrSpec {
       }
     }
 
-    SwitchType(on, cases ++ addCases)
+    SwitchType(on, SortedMap.from(cases ++ addCases))
   }
 }

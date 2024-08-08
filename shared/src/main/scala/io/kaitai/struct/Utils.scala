@@ -6,9 +6,14 @@ import scala.collection.mutable.ListBuffer
 
 object Utils {
   /**
+    * BigInt-typed max value of unsigned 32-bit integer.
+    */
+  final val MAX_UINT32 = BigInt("4294967295")
+
+  /**
     * BigInt-typed max value of unsigned 64-bit integer.
     */
-  val MAX_UINT64 = BigInt("18446744073709551615")
+  final val MAX_UINT64 = BigInt("18446744073709551615")
 
   private val RDecimal = "^(-?[0-9]+)$".r
   private val RHex = "^0x([0-9a-fA-F]+)$".r
@@ -91,21 +96,23 @@ object Utils {
     if (s.isEmpty) {
       s
     } else {
-      s.charAt(0).toUpper + s.substring(1)
+      s.charAt(0).toUpper.toString + s.substring(1)
     }
   }
 
   /**
     * Joins collection together to make a single string. Makes extra exception for empty
-    * collections (not like [[TraversableOnce]] `mkString`).
+    * collections (not like [[IterableOnce]] `mkString`).
     * @param start the starting string.
     * @param sep   the separator string.
     * @param end   the ending string.
     * @return If the collection is empty, returns empty string, otherwise returns `start`,
     *         then elements of the collection, every pair separated with `sep`, then `end`.
     */
-  def join[T](coll: TraversableOnce[T], start: String, sep: String, end: String): String =
-    if (coll.isEmpty) "" else coll.mkString(start, sep, end)
+  def join[T](coll: IterableOnce[T], start: String, sep: String, end: String): String = {
+    val it = coll.iterator
+    if (it.isEmpty) "" else it.mkString(start, sep, end)
+  }
 
   /**
     * Converts byte array (Seq[Byte]) into hex-escaped C-style literal characters

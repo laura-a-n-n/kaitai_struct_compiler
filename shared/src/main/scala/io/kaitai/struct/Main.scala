@@ -1,6 +1,6 @@
 package io.kaitai.struct
 
-import io.kaitai.struct.format.{ClassSpec, ClassSpecs, GenericStructClassSpec}
+import io.kaitai.struct.format.{ClassSpec, ClassSpecs, MetaSpec}
 import io.kaitai.struct.languages.{GoCompiler, NimCompiler, RustCompiler}
 import io.kaitai.struct.languages.components.LanguageCompilerStatic
 import io.kaitai.struct.precompile._
@@ -11,11 +11,11 @@ import scala.concurrent.ExecutionContext.Implicits.global
 
 object Main {
   /**
-    * Takes a freshly made [[ClassSpecs]] container with a single .ksy loaded
+    * Takes a freshly made [[format.ClassSpecs]] container with a single .ksy loaded
     * into it, launches recursive loading of imports into this container,
     * and then runs precompilation on every class that happens to be there
     * after imports.
-    * @param specs [[ClassSpecs]] container with first type loaded into it
+    * @param specs [[format.ClassSpecs]] container with first type loaded into it
     * @param config runtime configuration to be passed to precompile step
     * @return a future that will resolve when both imports and precompilations
     *         are complete; modifies given container by loading extra classes
@@ -30,48 +30,41 @@ object Main {
   }
 
   /**
-    * Runs precompilation steps on every type in the given [[ClassSpecs]] collection,
-    * using provided configuration.
+    * Runs precompilation steps on every type in the given [[format.ClassSpecs]] collection,
+    * using provided configuration. See individual precompile steps invocations for more
+    * in-depth description of what each step includes.
     *
-    * @param specs [[ClassSpecs]] container with all types loaded into it
+    * @param specs [[format.ClassSpecs]] container with all types loaded into it
     * @param config runtime configuration to be passed to precompile steps
     * @return a list of compilation problems encountered during precompilation steps
     */
-  def precompile(specs: ClassSpecs, config: RuntimeConfig): Iterable[CompilationProblem] = {
-    specs.flatMap { case (_, classSpec) =>
-      precompile(specs, classSpec, config)
+  def precompile(specs: ClassSpecs, conf: RuntimeConfig): Iterable[CompilationProblem] = {
+    new MarkupClassNames(specs).run()
+    val resolveTypeProblems = specs.flatMap { case (_, topClass) =>
+      val config = updateConfigFromMeta(conf, topClass.meta)
+      new ResolveTypes(specs, topClass, config.opaqueTypes).run()
     }
-  }
 
-  /**
-    * Does all precompiles steps on a single [[ClassSpec]] using provided configuration.
-    * See individual precompile steps invocations for more in-depth description of
-    * what each step includes.
-    *
-    * @param classSpecs [[ClassSpecs]] container with all types loaded into it
-    * @param topClass one top type to precompile
-    * @param config runtime configuration to be passed to precompile steps
-    * @return a list of compilation problems encountered during precompilation steps
-    */
-  def precompile(classSpecs: ClassSpecs, topClass: ClassSpec, config: RuntimeConfig): Iterable[CompilationProblem] = {
-    classSpecs.foreach { case (_, curClass) => MarkupClassNames.markupClassNames(curClass) }
-    val opaqueTypes = topClass.meta.opaqueTypes.getOrElse(config.opaqueTypes)
-    new ResolveTypes(classSpecs, opaqueTypes).run()
-    new ParentTypes(classSpecs).run()
-    new SpecsValueTypeDerive(classSpecs).run()
-    new CalculateSeqSizes(classSpecs).run()
-    val typeValidatorProblems = new TypeValidator(classSpecs, topClass).run()
+    // For now, bail out early in case we have any type resolution problems
+    // TODO: try to recover and do some more passes even in face of these
+    if (resolveTypeProblems.nonEmpty) {
+      return resolveTypeProblems
+    }
+
+    new ParentTypes(specs).run()
+    new SpecsValueTypeDerive(specs).run()
+    new CalculateSeqSizes(specs).run()
+    val typeValidatorProblems = new TypeValidator(specs).run()
 
     // Warnings
-    val styleWarnings = new StyleCheckIds(classSpecs, topClass).run()
+    val styleWarnings = new StyleCheckIds(specs).run()
+    val encodingProblems = new CanonicalizeEncodingNames(specs).run()
 
-    topClass.parentClass = GenericStructClassSpec
-
-    typeValidatorProblems ++ styleWarnings
+    resolveTypeProblems ++ typeValidatorProblems ++ styleWarnings ++ encodingProblems
   }
 
   /**
-    * Compiles a single [[ClassSpec]] into a single target language using
+    * Compiles a single [[format.ClassSpec]] into a single target language using
     * provided configuration.
     * @param specs bundle of class specifications (used to search to references there)
     * @param spec class specification to compile
@@ -80,7 +73,7 @@ object Main {
     * @return a container that contains all compiled files and results
     */
   def compile(specs: ClassSpecs, spec: ClassSpec, lang: LanguageCompilerStatic, conf: RuntimeConfig): CompileLog.SpecSuccess = {
-    val config = updateConfig(conf, spec)
+    val config = updateConfigFromMeta(conf, spec.meta)
 
     val cc = lang match {
       case GraphvizClassCompiler =>
@@ -103,16 +96,31 @@ object Main {
 
   /**
     * Updates runtime configuration with "enforcement" options that came from a source file itself.
-    * Currently only used to enforce debug when "ks-debug: true" is specified in top-level "meta" key.
+    * Currently used to enforce:
+    * * debug when "ks-debug: true" is specified in top-level "meta" key
+    * * zero copy stream usage when "ks-zero-copy-stream" is specified
+    *
     * @param config original runtime configuration
-    * @param topClass top-level class spec
+    * @param meta meta spec for top-level type
     * @return updated runtime configuration with applied enforcements
     */
-  private def updateConfig(config: RuntimeConfig, topClass: ClassSpec): RuntimeConfig = {
-    if (topClass.meta.forceDebug) {
+  private def updateConfigFromMeta(config: RuntimeConfig, meta: MetaSpec): RuntimeConfig = {
+    val config1 = if (meta.forceDebug) {
       config.copy(autoRead = false, readStoresPos = true)
     } else {
       config
     }
+
+    val config2 = meta.zeroCopySubstream match {
+      case Some(value) => config1.copy(zeroCopySubstream = value)
+      case None => config1
+    }
+
+    val config3 = meta.opaqueTypes match {
+      case Some(value) => config2.copy(opaqueTypes = value)
+      case None => config2
+    }
+
+    config3
   }
 }

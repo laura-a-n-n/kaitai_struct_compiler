@@ -53,6 +53,15 @@ case class KSVersion(nums: List[Int]) extends Ordered[KSVersion] {
     val v1 :: v2 :: v3 :: _ = nums ++ List.fill(3 - nums.size)(0)
     "%d.%03d_%03d".format(v1, v2, v3)
   }
+
+  /**
+    * Dumps a version as a tuple of ints in Python syntax,
+    * that is 1.2.3 becomes "(1, 2, 3)".
+    * There are no limitations on the number of version components or the range
+    * of values for each component.
+    * @return version as a tuple of ints in Python syntax
+    */
+  def toPythonTuple: String = nums.mkString("(", ", ", ")")
 }
 
 object KSVersion {
@@ -66,7 +75,7 @@ object KSVersion {
     */
   private var _current: Option[KSVersion] = None
 
-  def current_=(str: String) {
+  def current_=(str: String): Unit = {
     _current = Some(KSVersion.fromStr(str))
   }
 
@@ -82,5 +91,5 @@ object KSVersion {
     * language supports it) when trying to use generated file together
     * with this older runtime API.
     */
-  val minimalRuntime: KSVersion = KSVersion.fromStr("0.9")
+  val minimalRuntime: KSVersion = KSVersion.fromStr("0.11")
 }

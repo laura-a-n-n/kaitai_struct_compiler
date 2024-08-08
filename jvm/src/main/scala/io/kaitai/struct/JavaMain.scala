@@ -16,7 +16,7 @@ object JavaMain {
 
   case class CLIConfig(
     verbose: Seq[String] = Seq(),
-    srcFiles: Seq[File] = Seq(),
+    srcFiles: Seq[String] = Seq(),
     outDir: File = new File("."),
     targets: Seq[String] = Seq(),
     throwExceptions: Boolean = false,
@@ -31,18 +31,18 @@ object JavaMain {
 
   def parseCommandLine(args: Array[String]): Option[CLIConfig] = {
     val parser = new scopt.OptionParser[CLIConfig](Version.name) {
-      override def showUsageOnError = true
+      override def showUsageOnError = Some(true)
 
       head(Version.name, Version.version)
 
-      arg[File]("<file>...") unbounded() action { (x, c) =>
+      arg[String]("<file>...").unbounded().action { (x, c) =>
         c.copy(srcFiles = c.srcFiles :+ x) } text("source files (.ksy)")
 
       //      opt[File]('o', "outfile") valueName("<file>") action { (x, c) =>
       //        c.copy(outDir = x)
       //      } text("output filename (only if processing 1 file)")
 
-      opt[String]('t', "target") required() unbounded() valueName("<language>") action { (x, c) =>
+      opt[String]('t', "target").required().unbounded().valueName("<language>").action { (x, c) =>
         // TODO: make support for something like "-t java,python"
         if (x == "all") {
           c.copy(targets = ALL_LANGS.toSeq)
@@ -59,10 +59,10 @@ object JavaMain {
 
       opt[File]('d', "outdir") valueName("<directory>") action { (x, c) =>
         c.copy(outDir = x)
-      } text("output directory (filenames will be auto-generated)")
+      } text("output directory (filenames will be auto-generated); on Unix-like shells, the short form `-d` requires arguments to be preceded by `--`")
 
       val importPathExample = List("<directory>", "<directory>", "...").mkString(File.pathSeparator)
-      opt[String]('I', "import-path") optional() unbounded() valueName(importPathExample) action { (x, c) =>
+      opt[String]('I', "import-path").optional().unbounded().valueName(importPathExample).action { (x, c) =>
         c.copy(importPaths = c.importPaths ++ x.split(File.pathSeparatorChar))
       } text(".ksy library search path(s) for imports (see also KSPATH env variable)")
 
@@ -76,7 +76,7 @@ object JavaMain {
         )
       } text("C++ namespace (C++ only, default: none)")
 
-      opt[String]("cpp-standard") valueName("<standard>") action { (x, c) =>
+      opt[String]("cpp-standard").valueName("<standard>").action { (x, c) =>
         c.copy(
           runtime = c.runtime.copy(
             cppConfig = x match {
@@ -128,6 +128,10 @@ object JavaMain {
       opt[Boolean]("opaque-types") action { (x, c) =>
         c.copy(runtime = c.runtime.copy(opaqueTypes = x))
       } text("opaque types allowed, default: false")
+
+      opt[Boolean]("zero-copy-substream") action { (x, c) =>
+        c.copy(runtime = c.runtime.copy(zeroCopySubstream = x))
+      } text("zero-copy substreams allowed, default: true")
 
       opt[Unit]("ksc-exceptions") action { (x, c) =>
         c.copy(throwExceptions = true)
@@ -186,13 +190,13 @@ object JavaMain {
     // we need to decode it as well.
     //
     // Linux, from IDE:
-    // $HOME/git/kaitai_struct/compiler/jvm/target/scala-2.12/classes/
+    // $HOME/git/kaitai_struct/compiler/jvm/target/scala-2.13/classes/
     //
     // Linux, from stage:
     // $HOME/git/kaitai_struct/compiler/jvm/target/universal/stage/lib/io.kaitai.kaitai-struct-compiler-0.10-SNAPSHOT.jar
     //
     // Linux, from "sbt compilerJVM/run"
-    // $HOME/git/kaitai_struct/compiler/jvm/target/scala-2.12/classes/
+    // $HOME/git/kaitai_struct/compiler/jvm/target/scala-2.13/classes/
     //
     // Linux, from universal, custom install path:
     // /tmp/a%20b/kaitai-struct-compiler-0.10-SNAPSHOT/lib/io.kaitai.kaitai-struct-compiler-0.10-SNAPSHOT.jar
@@ -206,34 +210,70 @@ object JavaMain {
     // Windows, custom install path with spaces and non-latin chars:
     // /G:/%d0%b3%d0%b4%d0%b5-%d1%82%d0%be%20%d1%82%d0%b0%d0%bc/lib/io.kaitai.kaitai-struct-compiler-0.10-SNAPSHOT.jar
 
-    val fStr = classOf[JavaMain].getProtectionDomain.getCodeSource.getLocation.getPath
-    Log.importOps.info(() => s"home path: location = $fStr")
+    try {
+      optionOrLog(
+        classOf[JavaMain].getProtectionDomain.getCodeSource,
+        "home path: unable to run getCodeSource(), got null"
+      ).flatMap(sourceCode => optionOrLog(
+        sourceCode.getLocation,
+        "home path: unable to run getLocation(), got null"
+      )).flatMap(location => optionOrLog(
+        location.getPath,
+        "home path: unable to run getPath(), got null"
+      )).flatMap(fStr => {
+        Log.importOps.info(() => s"home path: location = $fStr")
 
-    if (fStr.endsWith(".jar")) {
-      val fDec = URLDecoder.decode(fStr, "UTF-8")
-      Log.importOps.info(() => s"... URL-decoded = $fDec")
+        if (fStr.endsWith(".jar")) {
+          val fDec = URLDecoder.decode(fStr, "UTF-8")
+          Log.importOps.info(() => s"... URL-decoded = $fDec")
 
-      val homeFile = new File(fDec).getParentFile.getParentFile
-      Log.importOps.info(() => s"... home = $homeFile")
+          val homeFile = new File(fDec).getParentFile.getParentFile
+          Log.importOps.info(() => s"... home = $homeFile")
 
-      if (homeFile.exists) {
-        val homeFormat = new File(homeFile, "formats")
-        Log.importOps.info(() => s"... formats = $homeFormat")
-        if (homeFormat.exists) {
-          Some(homeFormat.toString)
+          if (homeFile.exists) {
+            val homeFormat = new File(homeFile, "formats")
+            Log.importOps.info(() => s"... formats = $homeFormat")
+            if (homeFormat.exists) {
+              Some(homeFormat.toString)
+            } else {
+              Log.importOps.info(() => "... home formats dir doesn't exist => fail")
+              None
+            }
+          } else {
+            Log.importOps.info(() => s"... home doesn't exist => no home import paths")
+            None
+          }
         } else {
-          Log.importOps.info(() => "... home formats dir doesn't exist => fail")
+          Log.importOps.info(() => s"... not a jar, we're not running a packaged app => no home")
           None
         }
-      } else {
-        Log.importOps.info(() => s"... home doesn't exist => no home import paths")
+      })
+    } catch {
+      case se: SecurityException =>
+        Log.importOps.info(() => s"home path: unable to run getProtectionDomain(), got SecurityException $se")
         None
-      }
-    } else {
-      Log.importOps.info(() => s"... not a jar, we're not running a packaged app => no home")
-      None
     }
   }
+
+  /**
+   * Helper method to wrap nullable value (coming from Java API) into Option.
+   * If it's null, we will bail out and won't process any longer due to a chain
+   * of flatMap(), but if we use this method, we'll also note in our logging which
+   * step failed, making it easier to diagnose.
+   * @param nullableValue value which is potentially null
+   * @param errMsg error message to show in case if it's null
+   * @tparam T type of potentially nullable value
+   * @return option-wrapped value
+   * @see [[scala.Option.apply()]]
+   */
+  private def optionOrLog[T](nullableValue: T, errMsg: String): Option[T] =
+    Option(nullableValue) match {
+      case None =>
+        Log.importOps.info(() => errMsg)
+        None
+      case someValue =>
+        someValue
+    }
 
   private def envPaths: List[String] =
     sys.env.get("KSPATH").toList.flatMap((x) => x.split(File.pathSeparatorChar))
@@ -255,13 +295,13 @@ class JavaMain(config: CLIConfig) {
   def run(): Unit = {
     val logs: Map[String, InputEntry] = config.srcFiles.map { srcFile =>
       val log = if (config.throwExceptions) {
-        compileOneInput(srcFile.toString)
+        compileOneInput(srcFile)
       } else {
         try {
-          compileOneInput(srcFile.toString)
+          compileOneInput(srcFile)
         } catch {
           case ex: Throwable =>
-            InputFailure(List(exceptionToCompileError(ex, srcFile.toString)))
+            InputFailure(List(exceptionToCompileError(ex, srcFile)))
         }
       }
       if (!config.jsonOutput) {
@@ -272,7 +312,7 @@ class JavaMain(config: CLIConfig) {
         problems.foreach { (p) => Console.err.println(p.message) }
       }
 
-      srcFile.toString -> log
+      srcFile -> log
     }.toMap
 
     if (config.jsonOutput) {

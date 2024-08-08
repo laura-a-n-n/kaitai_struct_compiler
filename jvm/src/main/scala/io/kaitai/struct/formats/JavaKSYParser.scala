@@ -5,16 +5,14 @@ import java.nio.charset.StandardCharsets
 import java.util.{List => JList, Map => JMap}
 import io.kaitai.struct.JavaMain.CLIConfig
 import io.kaitai.struct.format.{ClassSpec, ClassSpecs}
-import io.kaitai.struct.problems.{CompilationProblem, CompilationProblemException, ProblemCoords, YAMLParserError}
+import io.kaitai.struct.problems.{CompilationProblem, CompilationProblemException, ProblemCoords, ProblemSeverity, YAMLParserError}
 import io.kaitai.struct.{Log, Main}
-import org.yaml.snakeyaml.constructor.SafeConstructor
 import org.yaml.snakeyaml.error.MarkedYAMLException
-import org.yaml.snakeyaml.representer.Representer
-import org.yaml.snakeyaml.{DumperOptions, LoaderOptions, Yaml}
+import org.yaml.snakeyaml.{LoaderOptions, Yaml}
 
-import scala.collection.JavaConversions._
 import scala.concurrent.Await
 import scala.concurrent.duration.Duration
+import scala.jdk.CollectionConverters._
 
 object JavaKSYParser {
   def localFileToSpecs(yamlFilename: String, config: CLIConfig): (Option[ClassSpecs], Iterable[CompilationProblem]) = {
@@ -24,7 +22,8 @@ object JavaKSYParser {
       val specs = new JavaClassSpecs(yamlDir, config.importPaths, firstSpec)
 
       val problems = Await.result(Main.importAndPrecompile(specs, config.runtime), Duration.Inf)
-      (Some(specs), problems)
+      val gotError = problems.exists(p => p.severity != ProblemSeverity.Warning)
+      (if (gotError) None else Some(specs), problems)
     } catch {
       case ex: CompilationProblemException =>
         val problem = ex.problem
@@ -70,12 +69,7 @@ object JavaKSYParser {
   def getYamlLoader: Yaml = {
     val loaderOptions = new LoaderOptions
     loaderOptions.setAllowDuplicateKeys(false)
-    new Yaml(
-      new SafeConstructor,
-      new Representer,
-      new DumperOptions,
-      loaderOptions
-    )
+    new Yaml(loaderOptions)
   }
 
   def readerToYaml(reader: Reader): Any = {
@@ -89,9 +83,9 @@ object JavaKSYParser {
   def yamlJavaToScala(src: Any): Any = {
     src match {
       case jlist: JList[AnyRef] =>
-        jlist.toList.map(yamlJavaToScala)
+        jlist.asScala.toList.map(yamlJavaToScala)
       case jmap: JMap[String, AnyRef] =>
-        jmap.toMap.mapValues(yamlJavaToScala)
+        jmap.asScala.toMap.view.mapValues(yamlJavaToScala).toMap
       case _: String =>
         src
       case _: Double =>

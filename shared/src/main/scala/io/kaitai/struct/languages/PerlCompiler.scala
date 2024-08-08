@@ -1,13 +1,14 @@
 package io.kaitai.struct.languages
 
-import io.kaitai.struct.datatype.{DataType, FixedEndian, InheritedEndian, KSError, NeedRaw}
+import io.kaitai.struct.datatype.{DataType, FixedEndian, InheritedEndian, KSError}
 import io.kaitai.struct.datatype.DataType._
 import io.kaitai.struct.exprlang.Ast
 import io.kaitai.struct.exprlang.Ast.expr
 import io.kaitai.struct.format._
 import io.kaitai.struct.languages.components.{ExceptionNames, _}
 import io.kaitai.struct.translators.{PerlTranslator, TypeProvider}
-import io.kaitai.struct.{ClassTypeProvider, RuntimeConfig}
+import io.kaitai.struct.{ClassTypeProvider, RuntimeConfig, Utils}
+import io.kaitai.struct.ExternalType
 
 class PerlCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   extends LanguageCompiler(typeProvider, config)
@@ -50,8 +51,8 @@ class PerlCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts("1;")
   }
 
-  override def opaqueClassDeclaration(classSpec: ClassSpec): Unit =
-    out.puts(s"use ${type2class(classSpec.name.head)};")
+  override def externalTypeDeclaration(extType: ExternalType): Unit =
+    importList.add(type2class(extType.name.head))
 
   override def classHeader(name: List[String]): Unit = {
     out.puts
@@ -76,6 +77,12 @@ class PerlCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def classConstructorHeader(name: List[String], parentType: DataType, rootClassName: List[String], isHybrid: Boolean, params: List[ParamDefSpec]): Unit = {
     val endianSuffix = if (isHybrid) ", $_is_le" else ""
 
+    val pRootValue = if (name == rootClassName) {
+      "$_root || $self"
+    } else {
+      "$_root"
+    }
+
     out.puts
     out.puts("sub new {")
     out.inc
@@ -84,7 +91,7 @@ class PerlCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts
     out.puts("bless $self, $class;")
     handleAssignmentSimple(ParentIdentifier, "$_parent")
-    handleAssignmentSimple(RootIdentifier, "$_root || $self;")
+    handleAssignmentSimple(RootIdentifier, pRootValue)
 
     if (isHybrid)
       handleAssignmentSimple(EndianIdentifier, "$_is_le")
@@ -92,7 +99,7 @@ class PerlCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts
   }
 
-  override def classConstructorFooter(): Unit = {
+  override def classConstructorFooter: Unit = {
     out.puts
     out.puts("return $self;")
     universalFooter
@@ -236,12 +243,10 @@ class PerlCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.inc
   }
 
-  override def condRepeatEosHeader(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw): Unit = {
-    if (needRaw.level >= 1)
-      out.puts(s"${privateMemberName(RawIdentifier(id))} = ();")
-    if (needRaw.level >= 2)
-      out.puts(s"${privateMemberName(RawIdentifier(RawIdentifier(id)))} = ();")
-    out.puts(s"${privateMemberName(id)} = ();")
+  override def condRepeatInitAttr(id: Identifier, dataType: DataType): Unit =
+    out.puts(s"${privateMemberName(id)} = [];")
+
+  override def condRepeatEosHeader(id: Identifier, io: String, dataType: DataType): Unit = {
     out.puts(s"while (!$io->is_eof()) {")
     out.inc
   }
@@ -249,12 +254,7 @@ class PerlCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def handleAssignmentRepeatEos(id: Identifier, expr: String): Unit =
     out.puts(s"push @{${privateMemberName(id)}}, $expr;")
 
-  override def condRepeatExprHeader(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw, repeatExpr: expr): Unit = {
-    if (needRaw.level >= 1)
-      out.puts(s"${privateMemberName(RawIdentifier(id))} = ();")
-    if (needRaw.level >= 2)
-      out.puts(s"${privateMemberName(RawIdentifier(RawIdentifier(id)))} = ();")
-    out.puts(s"${privateMemberName(id)} = ();")
+  override def condRepeatExprHeader(id: Identifier, io: String, dataType: DataType, repeatExpr: expr): Unit = {
     val nVar = s"$$n_${idToStr(id)}"
     out.puts(s"my $nVar = ${expression(repeatExpr)};")
     out.puts(s"for (my $$i = 0; $$i < $nVar; $$i++) {")
@@ -262,14 +262,9 @@ class PerlCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   }
 
   override def handleAssignmentRepeatExpr(id: Identifier, expr: String): Unit =
-    out.puts(s"${privateMemberName(id)}[$$i] = $expr;")
+    handleAssignmentRepeatEos(id, expr)
 
-  override def condRepeatUntilHeader(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw, untilExpr: expr): Unit = {
-    if (needRaw.level >= 1)
-      out.puts(s"${privateMemberName(RawIdentifier(id))} = ();")
-    if (needRaw.level >= 2)
-      out.puts(s"${privateMemberName(RawIdentifier(RawIdentifier(id)))} = ();")
-    out.puts(s"${privateMemberName(id)} = ();")
+  override def condRepeatUntilHeader(id: Identifier, io: String, dataType: DataType, untilExpr: expr): Unit = {
     out.puts("do {")
     out.inc
   }
@@ -284,7 +279,7 @@ class PerlCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts(s"push @{${privateMemberName(id)}}, $tmpName;")
   }
 
-  override def condRepeatUntilFooter(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw, untilExpr: expr): Unit = {
+  override def condRepeatUntilFooter(id: Identifier, io: String, dataType: DataType, untilExpr: expr): Unit = {
     typeProvider._currentIteratorType = Some(dataType)
     out.dec
     out.puts(s"} until (${expression(untilExpr)});")
@@ -302,13 +297,18 @@ class PerlCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
       case _: BytesEosType =>
         s"$io->read_bytes_full()"
       case BytesTerminatedType(terminator, include, consume, eosError, _) =>
-        s"$io->read_bytes_term($terminator, ${boolLiteral(include)}, ${boolLiteral(consume)}, ${boolLiteral(eosError)})"
+        if (terminator.length == 1) {
+          val term = terminator.head & 0xff
+          s"$io->read_bytes_term($term, ${boolLiteral(include)}, ${boolLiteral(consume)}, ${boolLiteral(eosError)})"
+        } else {
+          s"$io->read_bytes_term_multi(${translator.doByteArrayLiteral(terminator)}, ${boolLiteral(include)}, ${boolLiteral(consume)}, ${boolLiteral(eosError)})"
+        }
       case BitsType1(bitEndian) =>
         s"$io->read_bits_int_${bitEndian.toSuffix}(1)"
       case BitsType(width: Int, bitEndian) =>
         s"$io->read_bits_int_${bitEndian.toSuffix}($width)"
       case t: UserType =>
-        val addArgs = if (t.isOpaque) {
+        val addArgs = if (t.isExternal(typeProvider.nowClass)) {
           ""
         } else {
           val parent = t.forcedParent match {
@@ -325,13 +325,19 @@ class PerlCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     }
   }
 
-  override def bytesPadTermExpr(expr0: String, padRight: Option[Int], terminator: Option[Int], include: Boolean) = {
+  override def bytesPadTermExpr(expr0: String, padRight: Option[Int], terminator: Option[Seq[Byte]], include: Boolean) = {
     val expr1 = padRight match {
       case Some(padByte) => s"$kstreamName::bytes_strip_right($expr0, $padByte)"
       case None => expr0
     }
     val expr2 = terminator match {
-      case Some(term) => s"$kstreamName::bytes_terminate($expr1, $term, ${boolLiteral(include)})"
+      case Some(term) =>
+        if (term.length == 1) {
+          val t = term.head & 0xff
+          s"$kstreamName::bytes_terminate($expr1, $t, ${boolLiteral(include)})"
+        } else {
+          s"$kstreamName::bytes_terminate_multi($expr1, ${translator.doByteArrayLiteral(term)}, ${boolLiteral(include)})"
+        }
       case None => expr1
     }
     expr2
@@ -396,25 +402,27 @@ class PerlCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts
 
     enumColl.foreach { case (id, label) =>
-      out.puts(s"our ${enumValue(enumName, label.name)} = $id;")
+      out.puts(s"our ${enumValue(enumName, label.name)} = ${translator.doIntLiteral(id)};")
     }
   }
 
-  def enumValue(enumName: String, enumLabel: String) = translator.doEnumByLabel(List(enumName), enumLabel)
-
-  override def idToStr(id: Identifier): String = {
-    id match {
-      case NamedIdentifier(name) => name
-      case NumberedIdentifier(idx) => s"_${NumberedIdentifier.TEMPLATE}$idx"
-      case si: SpecialIdentifier => si.name
-      case RawIdentifier(inner) => s"_raw_${idToStr(inner)}"
-      case InstanceIdentifier(name) => name
-    }
+  override def classToString(toStringExpr: Ast.expr): Unit = {
+    out.puts
+    out.puts("use overload '\"\"' => \\&_to_string;")
+    out.puts
+    out.puts("sub _to_string {")
+    out.inc
+    out.puts("my ($self) = @_;")
+    out.puts(s"return ${translator.translate(toStringExpr)}")
+    out.dec
+    out.puts("}")
   }
 
-  override def privateMemberName(id: Identifier): String = s"$$self->{${idToStr(id)}}"
+  override def idToStr(id: Identifier): String = PerlCompiler.idToStr(id)
 
   override def publicMemberName(id: Identifier): String = idToStr(id)
+
+  override def privateMemberName(id: Identifier): String = PerlCompiler.privateMemberName(id)
 
   override def localTemporaryName(id: Identifier): String = s"$$_t_${idToStr(id)}"
 
@@ -432,10 +440,24 @@ object PerlCompiler extends LanguageCompilerStatic
     config: RuntimeConfig
   ): LanguageCompiler = new PerlCompiler(tp, config)
 
+  def idToStr(id: Identifier): String =
+    id match {
+      case SpecialIdentifier(name) => name
+      case NamedIdentifier(name) => name
+      case NumberedIdentifier(idx) => s"_${NumberedIdentifier.TEMPLATE}$idx"
+      case InstanceIdentifier(name) => name
+      case RawIdentifier(inner) => s"_raw_${idToStr(inner)}"
+    }
+
+  def privateMemberName(id: Identifier): String = s"$$self->{${idToStr(id)}}"
+
   def packageName: String = "IO::KaitaiStruct"
   override def kstreamName: String = s"$packageName::Stream"
   override def kstructName: String = s"$packageName::Struct"
   override def ksErrorName(err: KSError): String = ???
 
   def types2class(t: List[String]): String = t.map(type2class).mkString("::")
+
+  def enumValue(enumName: String, label: String): String =
+    s"$$${Utils.upperUnderscoreCase(enumName)}_${Utils.upperUnderscoreCase(label)}"
 }

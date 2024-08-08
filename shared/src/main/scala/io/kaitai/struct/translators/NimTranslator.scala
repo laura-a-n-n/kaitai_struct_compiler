@@ -6,17 +6,17 @@ import io.kaitai.struct.exprlang.Ast._
 import io.kaitai.struct.datatype._
 import io.kaitai.struct.datatype.DataType
 import io.kaitai.struct.datatype.DataType._
-import io.kaitai.struct.format.Identifier
+import io.kaitai.struct.format.{EnumSpec, Identifier}
 import io.kaitai.struct.languages.NimCompiler.{ksToNim, namespaced, camelCase}
 
 class NimTranslator(provider: TypeProvider, importList: ImportList) extends BaseTranslator(provider) {
   // Members declared in io.kaitai.struct.translators.BaseTranslator
-  override def bytesToStr(bytesExpr: String, encoding: Ast.expr): String = {
-    s"encode($bytesExpr, ${translate(encoding)})"
+  override def bytesToStr(bytesExpr: String, encoding: String): String = {
+    s"""encode($bytesExpr, ${doStringLiteral(encoding)})"""
   }
-  override def doEnumById(enumTypeAbs: List[String], id: String): String = s"${namespaced(enumTypeAbs)}($id)"
-//  override def doEnumByLabel(enumTypeAbs: List[String], label: String): String = s"${namespaced(enumTypeAbs)}($label)"
-  override def doEnumByLabel(enumTypeAbs: List[String], label: String): String = s"${enumTypeAbs.head}.$label"
+  override def doEnumById(enumSpec: EnumSpec, id: String): String = s"${namespaced(enumSpec.name)}($id)"
+//  override def doEnumByLabel(enumSpec: EnumSpec, label: String): String = s"${namespaced(enumSpec.name)}($label)"
+  override def doEnumByLabel(enumSpec: EnumSpec, label: String): String = s"${enumSpec.name.head}.$label"
   override def doName(s: String): String =
     s match {
       case Identifier.ROOT => "root"
@@ -42,7 +42,7 @@ class NimTranslator(provider: TypeProvider, importList: ImportList) extends Base
   override def arraySubscript(container: expr, idx: expr): String =
     s"${translate(container)}[${translate(idx)}]"
 
-  override def strConcat(left: Ast.expr, right: Ast.expr): String = "($" + s"${translate(left)} & " + "$" + s"${translate(right)})"
+  override def strConcat(left: expr, right: expr, extPrec: Int) = "($" + s"${translate(left)} & " + "$" + s"${translate(right)})"
 
   // Members declared in io.kaitai.struct.translators.CommonMethods
 
@@ -80,7 +80,7 @@ class NimTranslator(provider: TypeProvider, importList: ImportList) extends Base
       case _ => s"(${ksToNim(typeName)}(${translate(value)}))"
     }
   override def doIntLiteral(n: BigInt): String = {
-    if (n <= -2147483649L) { // -9223372036854775808..–2147483649
+    if (n <= -2147483649L) { // -9223372036854775808..-2147483649
       s"$n'i64"
     } else if (n <= 2147483647L) { // -2147483648..2147483647
       s"$n"
@@ -100,7 +100,10 @@ class NimTranslator(provider: TypeProvider, importList: ImportList) extends Base
     if (arr.size == 0)
       s"@[]"
     else
-      "@[" + arr.mkString("'u8, ") + "'u8]"
+      "@[" + arr.map(b => {
+        val ub: Int = b & 0xff
+        ub
+      }).mkString("'u8, ") + "'u8]"
   }
   override def doByteArrayNonLiteral(elts: Seq[expr]): String =
     s"@[${elts.map(translate).mkString(", ")}]"
@@ -111,7 +114,7 @@ class NimTranslator(provider: TypeProvider, importList: ImportList) extends Base
   override def arraySize(a: expr): String = s"len(${translate(a)})"
   override def enumToInt(v: expr, et: EnumType): String = s"ord(${translate(v)})"
   override def floatToInt(v: expr): String = s"int(${translate(v)})"
-  override def intToStr(v: expr, base: expr): String = {
+  override def intToStr(v: expr): String = {
     importList.add("strutils")
     s"intToStr(int(${translate(v)}))"
   }
@@ -124,4 +127,11 @@ class NimTranslator(provider: TypeProvider, importList: ImportList) extends Base
     s"${translate(s)}.substr(${translate(from)}, ${translate(to)} - 1)"
   override def strToInt(s: expr, base: expr): String =
     s"${translate(s)}.parseInt(${translate(base)})"
+
+  override def doInterpolatedStringLiteral(exprs: Seq[Ast.expr]): String =
+    if (exprs.isEmpty) {
+      doStringLiteral("")
+    } else {
+      exprs.map(anyToStr).mkString(" & ")
+    }
 }

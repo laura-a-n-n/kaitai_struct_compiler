@@ -1,8 +1,10 @@
 package io.kaitai.struct.translators
 
 import io.kaitai.struct.datatype.DataType
+import io.kaitai.struct.datatype.DataType.{ArrayType, BytesType, IntType}
 import io.kaitai.struct.exprlang.Ast
 import io.kaitai.struct.format.Identifier
+import io.kaitai.struct.precompile.{EnumMemberNotFoundError, TypeMismatchError}
 
 /**
   * Validates expressions usage of types (in typecasting operator,
@@ -11,7 +13,7 @@ import io.kaitai.struct.format.Identifier
   *
   * Implemented essentially as a no-op translator, which does all the
   * recursive traversing that regular translator performs, but outputs
-  * not result.
+  * no result.
   *
   * @param provider TypeProvider that will answer queries on user types
   */
@@ -33,8 +35,10 @@ class ExpressionValidator(val provider: TypeProvider)
         provider.resolveEnum(inType, enumType.name)
         validate(id)
       case Ast.expr.EnumByLabel(enumType, label, inType) =>
-        provider.resolveEnum(inType, enumType.name)
-        // TODO: check that label belongs to that enum
+        val enumSpec = provider.resolveEnum(inType, enumType.name)
+        if (!enumSpec.map.values.exists(_.name == label.name)) {
+          throw new EnumMemberNotFoundError(label.name, enumType.name, enumSpec.path.mkString("/"))
+        }
       case Ast.expr.Name(name: Ast.identifier) =>
         if (name.name == Identifier.SIZEOF) {
           CommonSizeOf.getByteSizeOfClassSpec(provider.nowClass)
@@ -56,8 +60,18 @@ class ExpressionValidator(val provider: TypeProvider)
         validate(ifTrue)
         validate(ifFalse)
       case Ast.expr.Subscript(container: Ast.expr, idx: Ast.expr) =>
-        validate(container)
-        validate(idx)
+        detectType(container) match {
+          case _: ArrayType | _: BytesType =>
+            validate(container)
+            detectType(idx) match {
+              case _: IntType =>
+                validate(idx)
+              case indexType =>
+                throw new TypeMismatchError(s"subscript operation on arrays require index to be integer, but found $indexType")
+            }
+          case x =>
+            throw new TypeMismatchError(s"subscript operation is not supported on object type $x")
+        }
       case call: Ast.expr.Attribute =>
         translateAttribute(call)
       case call: Ast.expr.Call =>
@@ -71,6 +85,8 @@ class ExpressionValidator(val provider: TypeProvider)
         CommonSizeOf.getBitsSizeOfType(typeName.nameAsStr, detectCastType(typeName))
       case Ast.expr.BitSizeOfType(typeName) =>
         CommonSizeOf.getBitsSizeOfType(typeName.nameAsStr, detectCastType(typeName))
+      case Ast.expr.InterpolatedStr(elts: Seq[Ast.expr]) =>
+        elts.foreach(validate)
     }
   }
 
@@ -95,14 +111,12 @@ class ExpressionValidator(val provider: TypeProvider)
     validate(to)
   }
 
-  override def bytesToStr(value: Ast.expr, expr: Ast.expr): Unit = {
+  override def bytesToStr(value: Ast.expr, encoding: String): Unit = {
     validate(value)
-    validate(expr)
   }
 
-  override def intToStr(value: Ast.expr, num: Ast.expr): Unit = {
+  override def intToStr(value: Ast.expr): Unit = {
     validate(value)
-    validate(num)
   }
 
   override def floatToInt(value: Ast.expr): Unit = validate(value)

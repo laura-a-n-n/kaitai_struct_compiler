@@ -7,6 +7,9 @@ import io.kaitai.struct.format.{ClassSpec, Identifier}
 import io.kaitai.struct.languages.GoCompiler
 import io.kaitai.struct.precompile.TypeMismatchError
 import io.kaitai.struct.{ImportList, StringLanguageOutputWriter, Utils}
+import io.kaitai.struct.format.SpecialIdentifier
+import io.kaitai.struct.format.NamedIdentifier
+import io.kaitai.struct.format.InstanceIdentifier
 
 sealed trait TranslatorResult
 case class ResultString(s: String) extends TranslatorResult
@@ -25,14 +28,14 @@ class GoTranslator(out: StringLanguageOutputWriter, provider: TypeProvider, impo
 
   var returnRes: Option[String] = None
 
-  override def translate(v: Ast.expr): String = resToStr(translateExpr(v))
+  override def translate(v: Ast.expr, extPrec: Int): String = resToStr(translateExpr(v, extPrec))
 
   def resToStr(r: TranslatorResult): String = r match {
     case ResultString(s) => s
     case ResultLocalVar(n) => localVarName(n)
   }
 
-  def translateExpr(v: Ast.expr): TranslatorResult = {
+  def translateExpr(v: Ast.expr, extPrec: Int = 0): TranslatorResult = {
     v match {
       case Ast.expr.IntNum(n) =>
         trIntLiteral(n)
@@ -40,6 +43,8 @@ class GoTranslator(out: StringLanguageOutputWriter, provider: TypeProvider, impo
         trFloatLiteral(n)
       case Ast.expr.Str(s) =>
         trStringLiteral(s)
+      case Ast.expr.InterpolatedStr(s) =>
+        trInterpolatedStringLiteral(s)
       case Ast.expr.Bool(n) =>
         trBoolLiteral(n)
       case Ast.expr.EnumById(enumType, id, inType) =>
@@ -54,13 +59,20 @@ class GoTranslator(out: StringLanguageOutputWriter, provider: TypeProvider, impo
         } else {
           trLocalName(name.name)
         }
-      case Ast.expr.UnaryOp(op, operand) =>
-        ResultString(unaryOp(op) + (operand match {
-          case Ast.expr.IntNum(_) | Ast.expr.FloatNum(_) =>
-            translate(operand)
+      case Ast.expr.InternalName(id: Identifier) =>
+        trInternalName(id)
+      case Ast.expr.UnaryOp(op: Ast.unaryop, inner: Ast.expr) =>
+        val opStr = unaryOp(op)
+        ResultString((op, inner) match {
+          /** [[doIntLiteral]] has to know when a negative number is being translated - if it
+           * doesn't, the result is things like `-uint32(2147483648)` that will not compile in Go
+           * (the error is "constant -2147483648 overflows uint32") */
+          case (Ast.unaryop.Minus, Ast.expr.IntNum(n)) => translate(Ast.expr.IntNum(-n))
+          case (_, Ast.expr.IntNum(_) | Ast.expr.FloatNum(_)) =>
+            s"$opStr${translate(inner)}"
           case _ =>
-            s"(${translate(operand)})"
-        }))
+            s"$opStr(${translate(inner)})"
+        })
       case Ast.expr.Compare(left, op, right) =>
         (detectType(left), detectType(right)) match {
           case (_: NumericType, _: NumericType) =>
@@ -79,9 +91,9 @@ class GoTranslator(out: StringLanguageOutputWriter, provider: TypeProvider, impo
       case Ast.expr.BinOp(left: Ast.expr, op: Ast.operator, right: Ast.expr) =>
         (detectType(left), detectType(right), op) match {
           case (_: NumericType, _: NumericType, _) =>
-            trNumericBinOp(left, op, right)
+            trNumericBinOp(left, op, right, extPrec)
           case (_: StrType, _: StrType, Ast.operator.Add) =>
-            trStrConcat(left, right)
+            trStrConcat(left, right, extPrec)
           case (ltype, rtype, _) =>
             throw new TypeMismatchError(s"can't do $ltype $op $rtype")
         }
@@ -129,7 +141,7 @@ class GoTranslator(out: StringLanguageOutputWriter, provider: TypeProvider, impo
   def trBooleanOp(op: Ast.boolop, values: Seq[Ast.expr]) =
     ResultString(doBooleanOp(op, values))
 
-  def trNumericBinOp(left: Ast.expr, op: Ast.operator, right: Ast.expr): TranslatorResult = {
+  def trNumericBinOp(left: Ast.expr, op: Ast.operator, right: Ast.expr, extPrec: Int): TranslatorResult = {
     (detectType(left), detectType(right), op) match {
       case (t1: IntType, t2: IntType, Ast.operator.Mod) =>
         val v1 = allocateLocalVar()
@@ -141,12 +153,12 @@ class GoTranslator(out: StringLanguageOutputWriter, provider: TypeProvider, impo
         out.puts("}")
         ResultLocalVar(v1)
       case _ =>
-        ResultString(numericBinOp(left, op, right))
+        ResultString(genericBinOp(left, op, right, extPrec))
     }
   }
 
-  def trStrConcat(left: Ast.expr, right: Ast.expr): TranslatorResult =
-    ResultString(translate(left) + " + " + translate(right))
+  def trStrConcat(left: Ast.expr, right: Ast.expr, extPrec: Int): TranslatorResult =
+    ResultString(genericBinOp(left, Ast.operator.Add, right, extPrec))
 
   def trNumericCompareOp(left: Ast.expr, op: Ast.cmpop, right: Ast.expr): TranslatorResult =
     ResultString(doNumericCompareOp(left, op, right))
@@ -168,7 +180,7 @@ class GoTranslator(out: StringLanguageOutputWriter, provider: TypeProvider, impo
     if (n < -9223372036854775808L) {
       s"$n" // too low, no type conversion would help anyway
     } else if (n <= -2147483649L) {
-      s"int64($n)" // -9223372036854775808..–2147483649
+      s"int64($n)" // -9223372036854775808..-2147483649
     } else if (n <= 2147483647L) {
       s"$n" // -2147483648..2147483647
     } else if (n <= 4294967295L) {
@@ -209,6 +221,9 @@ class GoTranslator(out: StringLanguageOutputWriter, provider: TypeProvider, impo
         }
     }
   }
+
+  def trInternalName(id: Identifier): TranslatorResult =
+    ResultString(GoCompiler.privateMemberName(id))
 
   def specialName(id: String): String = id match {
     case Identifier.ROOT | Identifier.PARENT | Identifier.IO =>
@@ -270,26 +285,23 @@ class GoTranslator(out: StringLanguageOutputWriter, provider: TypeProvider, impo
   val IMPORT_CHARMAP = "golang.org/x/text/encoding/charmap"
 
   val ENCODINGS = Map(
-    "cp437" -> ("charmap.CodePage437", IMPORT_CHARMAP),
-    "iso8859-1" -> ("charmap.ISO8859_1", IMPORT_CHARMAP),
-    "iso8859-2" -> ("charmap.ISO8859_2", IMPORT_CHARMAP),
-    "iso8859-3" -> ("charmap.ISO8859_3", IMPORT_CHARMAP),
-    "iso8859-4" -> ("charmap.ISO8859_4", IMPORT_CHARMAP),
-    "sjis" -> ("japanese.ShiftJIS", "golang.org/x/text/encoding/japanese"),
-    "big5" -> ("traditionalchinese.Big5", "golang.org/x/text/encoding/traditionalchinese")
+    "IBM437" -> ("charmap.CodePage437", IMPORT_CHARMAP),
+    "ISO-8859-1" -> ("charmap.ISO8859_1", IMPORT_CHARMAP),
+    "ISO-8859-2" -> ("charmap.ISO8859_2", IMPORT_CHARMAP),
+    "ISO-8859-3" -> ("charmap.ISO8859_3", IMPORT_CHARMAP),
+    "ISO-8859-4" -> ("charmap.ISO8859_4", IMPORT_CHARMAP),
+    "SJIS" -> ("japanese.ShiftJIS", "golang.org/x/text/encoding/japanese"),
+    "BIG5" -> ("traditionalchinese.Big5", "golang.org/x/text/encoding/traditionalchinese"),
+    "UTF-16LE" -> ("unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM)", "golang.org/x/text/encoding/unicode"),
+    "UTF-16BE" -> ("unicode.UTF16(unicode.BigEndian, unicode.IgnoreBOM)", "golang.org/x/text/encoding/unicode")
   )
 
-  override def bytesToStr(value: Ast.expr, expr: Ast.expr): TranslatorResult =
-    bytesToStr(translate(value), expr)
+  override def bytesToStr(value: Ast.expr, encoding: String): TranslatorResult =
+    bytesToStr(translate(value), encoding)
 
-  def bytesToStr(bytesExpr: String, encoding: Ast.expr): TranslatorResult = {
-    val enc = encoding match {
-      case Ast.expr.Str(s) => s
-      case _ => throw new RuntimeException("Variable encodings are not supported in Go yet")
-    }
-
-    enc.toLowerCase match {
-      case "ascii" | "utf-8" | "utf8" =>
+  def bytesToStr(bytesExpr: String, encoding: String): TranslatorResult = {
+    encoding match {
+      case "ASCII" | "UTF-8" =>
         // no conversion
         // FIXME: may be add some checks for valid ASCII/UTF-8
         ResultString(s"string($bytesExpr)")
@@ -372,26 +384,25 @@ class GoTranslator(out: StringLanguageOutputWriter, provider: TypeProvider, impo
     outVarCheckRes(s"strconv.ParseInt(${translate(s)}, ${translate(base)}, 0)")
   }
 
-  override def strSubstring(s: Ast.expr, from: Ast.expr, to: Ast.expr): TranslatorResult = {
-    ResultString(s"${translate(s)}[${translate(from)}:${translate(to)}]")
-  }
+  override def strSubstring(s: Ast.expr, from: Ast.expr, to: Ast.expr): TranslatorResult =
+    ResultString(s"${translate(s, METHOD_PRECEDENCE)}[${translate(from)}:${translate(to)}]")
 
-  override def intToStr(value: Ast.expr, base: Ast.expr): TranslatorResult = {
+  override def intToStr(value: Ast.expr): TranslatorResult = {
     importList.add("strconv")
-    ResultString(s"strconv.FormatInt(int64(${translate(value)}), ${translate(base)})")
+    ResultString(s"strconv.FormatInt(int64(${translate(value)}), 10)")
   }
 
   override def floatToInt(value: Ast.expr) =
     ResultString(s"int(${translate(value)})")
 
   override def kaitaiStreamSize(value: Ast.expr) =
-    outVarCheckRes(s"${translate(value)}.Size()")
+    outVarCheckRes(s"${translate(value, METHOD_PRECEDENCE)}.Size()")
 
   override def kaitaiStreamEof(value: Ast.expr) =
-    outVarCheckRes(s"${translate(value)}.EOF()")
+    outVarCheckRes(s"${translate(value, METHOD_PRECEDENCE)}.EOF()")
 
   override def kaitaiStreamPos(value: Ast.expr) =
-    outVarCheckRes(s"${translate(value)}.Pos()")
+    outVarCheckRes(s"${translate(value, METHOD_PRECEDENCE)}.Pos()")
 
   override def arrayMin(a: Ast.expr): ResultLocalVar = {
     val min = allocateLocalVar()
@@ -441,17 +452,46 @@ class GoTranslator(out: StringLanguageOutputWriter, provider: TypeProvider, impo
 
   def userType(t: UserType, io: String) = {
     val v = allocateLocalVar()
-    val parent = t.forcedParent match {
-      case Some(USER_TYPE_NO_PARENT) => "nil"
-      case Some(fp) => translate(fp)
-      case None => "this"
+    val (parent, root) = if (t.isExternal(provider.nowClass)) {
+      ("nil", "nil")
+    } else {
+      val parent = t.forcedParent match {
+        case Some(USER_TYPE_NO_PARENT) => "nil"
+        case Some(fp) => translate(fp)
+        case None => "this"
+      }
+      (parent, "this._root")
     }
-    val root = if (t.isOpaque) "nil" else "this._root"
     val addParams = t.args.map((a) => translate(a)).mkString(", ")
     out.puts(s"${localVarName(v)} := New${GoCompiler.types2class(t.classSpec.get.name)}($addParams)")
     out.puts(s"err = ${localVarName(v)}.Read($io, $parent, $root)")
     outAddErrCheck()
     ResultLocalVar(v)
+  }
+
+  def trInterpolatedStringLiteral(exprs: Seq[Ast.expr]): TranslatorResult = {
+    exprs match {
+      case Seq(Ast.expr.Str(s)) =>
+        // exactly one string literal, no need for printf at all
+        trStringLiteral(s)
+
+      case _ =>
+        importList.add("fmt")
+
+        val piecesAndArgs: Seq[(String, Option[String])] = exprs.map {
+          case Ast.expr.Str(s) =>
+            // This string will be used as format string, so we need to escape all `%` as `%%`
+            val escapedFmtStr = s.replace("%", "%%")
+            (doStringLiteralBody(escapedFmtStr), None)
+          case e =>
+            ("%v", Some(translate(e)))
+        }
+
+        val fmtString = piecesAndArgs.map(x => x._1).mkString
+        val fmtArgs = piecesAndArgs.flatMap(x => x._2)
+
+        ResultString("fmt.Sprintf(\"" + fmtString + "\", " + fmtArgs.mkString(", ") + ")")
+    }
   }
 
   def outVarCheckRes(expr: String): ResultLocalVar = {
@@ -476,7 +516,7 @@ class GoTranslator(out: StringLanguageOutputWriter, provider: TypeProvider, impo
 
   def localVarName(n: Int) = s"tmp$n"
 
-  def outAddErrCheck() {
+  def outAddErrCheck(): Unit = {
     out.puts("if err != nil {")
     out.inc
 

@@ -4,13 +4,16 @@ import io.kaitai.struct.exprlang.{Ast, Expressions}
 import io.kaitai.struct.format._
 import io.kaitai.struct.problems.KSYParseError
 import io.kaitai.struct.translators.TypeDetector
+import io.kaitai.struct.precompile.CanonicalizeEncodingNames
+
+import scala.collection.immutable.SortedMap
 
 sealed trait DataType {
   /**
     * @return Data type as non-owning data type. Default implementation
     *         always returns itself, complex types
     */
-  def asNonOwning: DataType = this
+  def asNonOwning(isOwningInExpr: Boolean = false): DataType = this
 }
 
 /**
@@ -68,20 +71,20 @@ object DataType {
     override def process = None
   }
   case class BytesEosType(
-    terminator: Option[Int],
+    terminator: Option[Seq[Byte]],
     include: Boolean,
     padRight: Option[Int],
     override val process: Option[ProcessExpr]
   ) extends BytesType
   case class BytesLimitType(
     size: Ast.expr,
-    terminator: Option[Int],
+    terminator: Option[Seq[Byte]],
     include: Boolean,
     padRight: Option[Int],
     override val process: Option[ProcessExpr]
   ) extends BytesType
   case class BytesTerminatedType(
-    terminator: Int,
+    terminator: Seq[Byte],
     include: Boolean,
     consume: Boolean,
     eosError: Boolean,
@@ -90,7 +93,24 @@ object DataType {
 
   abstract class StrType extends DataType
   case object CalcStrType extends StrType
-  case class StrFromBytesType(bytes: BytesType, encoding: String) extends StrType
+  /**
+    * A type that have the `str` and `strz` built-in Kaitai types.
+    *
+    * @param bytes An underlying bytes of the string
+    * @param encoding An encoding used to convert byte array into string
+    * @param isEncodingDerived A flag that is `true` when encoding is derived from
+    *        `meta/encoding` key of a type in which attribute with this type is
+    *        defined and `false` when encoding defined in the attribute
+    */
+  case class StrFromBytesType(
+    bytes: BytesType,
+    var encoding: String,
+    // FIXME: Actually, this should not be a part of KSY model used to code generation,
+    // but be a part of intermediate model. The current design of KSC does not have
+    // that intermediate model yet, so we put this flag here. See discussion at
+    // https://github.com/kaitai-io/kaitai_struct_compiler/pull/278#discussion_r1527312479
+    isEncodingDerived: Boolean,
+  ) extends StrType
 
   case object CalcBooleanType extends BooleanType
 
@@ -110,6 +130,22 @@ object DataType {
       *         and its destruction.
       */
     def isOwning: Boolean
+    /**
+      * @return If true, this type acts like an owning type in expressions, BUT the
+      *         data block is already owned by another type.
+      *
+      *         The only situation when this can be `true` is when subscripting
+      *         an array with owning inner type. Although the element
+      *         obtained from such an array has the "owning" type (behaves in
+      *         expressions like that), we can't save it in a value instance with
+      *         owning type as well, because the data block representing the element
+      *         is already owned by the array, so the instance CAN'T OWN IT too.
+      *         So [[isOwning]] = false and [[isOwningInExpr]] = true.
+      *
+      *         If [[isOwning]] == true, [[isOwningInExpr]] can't be `true` as well,
+      *         this MUST stay `false` in owning types.
+      */
+    def isOwningInExpr: Boolean = false
   }
 
   abstract class StructType extends ComplexDataType
@@ -128,9 +164,18 @@ object DataType {
     var args: Seq[Ast.expr]
   ) extends StructType {
     var classSpec: Option[ClassSpec] = None
+    /**
+      * Determines whether the user type represented by this `UserType` instance
+      * is external from the perspective of the given `ClassSpec` in which it is
+      * used (via `seq`, `instances` or `params`).
+      * @param curClass class spec from which the local/external relationship
+      * should be evaluated
+      */
+    def isExternal(curClass: ClassSpec): Boolean =
+      classSpec.get.isExternal(curClass)
     def isOpaque = {
       val cs = classSpec.get
-      cs.isTopLevel || cs.meta.isOpaque
+      cs.meta.isOpaque
     }
   }
   case class UserTypeInstream(
@@ -139,8 +184,8 @@ object DataType {
     _args: Seq[Ast.expr] = Seq()
   ) extends UserType(_name, _forcedParent, _args) {
     def isOwning = true
-    override def asNonOwning: UserType = {
-      val r = CalcUserType(name, forcedParent, args)
+    override def asNonOwning(isOwningInExpr: Boolean = false): UserType = {
+      val r = CalcUserType(name, forcedParent, args, isOwningInExpr)
       r.classSpec = classSpec
       r
     }
@@ -153,8 +198,8 @@ object DataType {
     override val process: Option[ProcessExpr]
   ) extends UserType(_name, _forcedParent, _args) with Processing {
     override def isOwning = true
-    override def asNonOwning: UserType = {
-      val r = CalcUserTypeFromBytes(name, forcedParent, args, bytes, process)
+    override def asNonOwning(isOwningInExpr: Boolean = false): UserType = {
+      val r = CalcUserTypeFromBytes(name, forcedParent, args, bytes, process, isOwningInExpr)
       r.classSpec = classSpec
       r
     }
@@ -162,7 +207,8 @@ object DataType {
   case class CalcUserType(
     _name: List[String],
     _forcedParent: Option[Ast.expr],
-    _args: Seq[Ast.expr] = Seq()
+    _args: Seq[Ast.expr] = Seq(),
+    override val isOwningInExpr: Boolean = false
   ) extends UserType(_name, _forcedParent, _args) {
     override def isOwning = false
   }
@@ -171,7 +217,8 @@ object DataType {
     _forcedParent: Option[Ast.expr],
     _args: Seq[Ast.expr] = Seq(),
     bytes: BytesType,
-    override val process: Option[ProcessExpr]
+    override val process: Option[ProcessExpr],
+    override val isOwningInExpr: Boolean = false
   ) extends UserType(_name, _forcedParent, _args) with Processing {
     override def isOwning = false
   }
@@ -180,25 +227,26 @@ object DataType {
 
   case class ArrayTypeInStream(_elType: DataType) extends ArrayType(_elType) {
     override def isOwning: Boolean = true
-    override def asNonOwning: CalcArrayType = CalcArrayType(elType)
+    override def asNonOwning(isOwningInExpr: Boolean = false): CalcArrayType = CalcArrayType(elType, isOwningInExpr)
   }
-  case class CalcArrayType(_elType: DataType) extends ArrayType(_elType) {
+  case class CalcArrayType(_elType: DataType, override val isOwningInExpr: Boolean = false) extends ArrayType(_elType) {
     override def isOwning: Boolean = false
   }
 
+  /** Represents `_parent: false` expression which means that type explicitly has no parent. */
   val USER_TYPE_NO_PARENT = Ast.expr.Bool(false)
 
   case object AnyType extends DataType
   case object KaitaiStructType extends StructType {
     def isOwning = true
-    override def asNonOwning: DataType = CalcKaitaiStructType
+    override def asNonOwning(isOwningInExpr: Boolean = false): DataType = CalcKaitaiStructType(isOwningInExpr)
   }
-  case object CalcKaitaiStructType extends StructType {
+  case class CalcKaitaiStructType(override val isOwningInExpr: Boolean = false) extends StructType {
     def isOwning = false
   }
   case object OwnedKaitaiStreamType extends ComplexDataType {
     def isOwning = true
-    override def asNonOwning: DataType = KaitaiStreamType
+    override def asNonOwning(isOwningInExpr: Boolean = false): DataType = KaitaiStreamType
   }
   case object KaitaiStreamType extends ComplexDataType {
     def isOwning = false
@@ -206,9 +254,24 @@ object DataType {
 
   case class EnumType(name: List[String], basedOn: IntType) extends DataType {
     var enumSpec: Option[EnumSpec] = None
+
+    /**
+      * Determines whether the enum represented by this `EnumType` instance
+      * is external from the perspective of the given `ClassSpec` in which it is
+      * used (via `seq`, `instances` or `params`).
+      * @param curClass class spec from which the local/external relationship
+      * should be evaluated
+      */
+    def isExternal(curClass: ClassSpec): Boolean =
+      enumSpec.get.isExternal(curClass)
   }
 
-  case class SwitchType(on: Ast.expr, cases: Map[Ast.expr, DataType], isOwning: Boolean = true) extends ComplexDataType {
+  case class SwitchType(
+    on: Ast.expr,
+    cases: SortedMap[Ast.expr, DataType],
+    isOwning: Boolean = true,
+    override val isOwningInExpr: Boolean = false
+  ) extends ComplexDataType {
     def combinedType: DataType = TypeDetector.combineTypes(cases.values)
 
     /**
@@ -246,7 +309,7 @@ object DataType {
         t.isInstanceOf[UserTypeFromBytes] || t.isInstanceOf[BytesType]
       )
 
-    override def asNonOwning: DataType = SwitchType(on, cases, false)
+    override def asNonOwning(isOwningInExpr: Boolean = false): DataType = SwitchType(on, cases, false, isOwningInExpr)
   }
 
   object SwitchType {
@@ -280,12 +343,13 @@ object DataType {
       val (_on, _cases) = fromYaml1(switchSpec, path)
 
       val on = Expressions.parse(_on)
-      val cases: Map[Ast.expr, DataType] = _cases.map { case (condition, typeName) =>
-        Expressions.parse(condition) -> DataType.fromYaml(
-          Some(typeName), path ++ List("cases"), metaDef,
-          arg
-        )
-      }
+      val cases: Map[Ast.expr, DataType] = SortedMap.from(
+        _cases.map { case (condition, typeName) =>
+          Expressions.parse(condition) -> DataType.fromYaml(
+            Some(typeName), path ++ List("cases"), metaDef,
+            arg
+          )
+        })
 
       // If we have size defined, and we don't have any "else" case already, add
       // an implicit "else" case that will at least catch everything else as
@@ -305,7 +369,7 @@ object DataType {
         }
       }
 
-      SwitchType(on, cases ++ addCases)
+      SwitchType(on, SortedMap.from(cases ++ addCases))
     }
   }
 
@@ -366,15 +430,33 @@ object DataType {
         case "str" | "strz" =>
           val enc = getEncoding(arg.encoding, metaDef, path)
 
-          // "strz" makes terminator = 0 by default
+          // "strz" selects the appropriate null terminator depending on the "encoding", i.e. 2 zero
+          // bytes for UTF-16*, 4 zero bytes for UTF-32* and 1 zero byte for all other encodings
           val arg2 = if (dt == "strz") {
-            arg.copy(terminator = arg.terminator.orElse(Some(0)))
+            val term = arg.terminator match {
+              case Some(t) =>
+                t
+              case None =>
+                // FIXME: ideally, this null terminator resolution should not happen here in the
+                // "YAML parsing stage", but later on some intermediate representation after the
+                // `CanonicalizeEncodingNames` precompile step has run. See the discussion in
+                // https://github.com/kaitai-io/kaitai_struct_compiler/pull/278#discussion_r1527198115
+                val (newEncoding, problem) = CanonicalizeEncodingNames.canonicalizeName(enc)
+                val nullTerm: Seq[Byte] = newEncoding match {
+                  /** @note Must be kept in sync with [[EncodingList.canonicalToAlias]] */
+                  case "UTF-16LE" | "UTF-16BE" => Seq(0, 0)
+                  case "UTF-32LE" | "UTF-32BE" => Seq(0, 0, 0, 0)
+                  case _ => Seq(0)
+                }
+                nullTerm
+            }
+            arg.copy(terminator = Some(term))
           } else {
             arg
           }
 
           val bat = arg2.getByteArrayType(path)
-          StrFromBytesType(bat, enc)
+          StrFromBytesType(bat, enc, arg.encoding.isEmpty)
         case _ =>
           val typeWithArgs = Expressions.parseTypeRef(dt)
           if (arg.size.isEmpty && !arg.sizeEos && arg.terminator.isEmpty) {
@@ -461,7 +543,7 @@ object DataType {
         }
       case "str" => CalcStrType
       case "bool" => CalcBooleanType
-      case "struct" => CalcKaitaiStructType
+      case "struct" => CalcKaitaiStructType()
       case "io" => KaitaiStreamType
       case "any" => AnyType
       case _ => CalcUserType(classNameToList(singleId), None)

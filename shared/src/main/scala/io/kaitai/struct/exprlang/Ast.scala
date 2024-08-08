@@ -1,5 +1,7 @@
 package io.kaitai.struct.exprlang
 
+import io.kaitai.struct.format.{Identifier, InstanceIdentifier}
+
 /**
   * Loosely based on /pythonparse/shared/src/main/scala/pythonparse/
   * from FastParse, Copyright (c) 2014 Li Haoyi (haoyi.sg@gmail.com)
@@ -47,6 +49,18 @@ object Ast {
       *         variable
       */
     def evaluateIntConst: Option[BigInt] = ConstEvaluator.evaluateIntConst(this)
+
+    /**
+      * Evaluates the expression, if it's possible to get a string constant as
+      * the result of evaluation.
+      *
+      * @return string result of evaluation if it's constant or None, if it's
+      *         variable
+      */
+    def evaluateStrConst: Option[String] = ConstEvaluator.evaluate(this) match {
+      case ConstEvaluator.value.Str(x) => Some(x)
+      case _ => None
+    }
   }
 
   object expr{
@@ -72,7 +86,16 @@ object Ast {
     /** Represents `X[Y]`. */
     case class Subscript(value: expr, idx: expr) extends expr
     case class Name(id: identifier) extends expr
+    /** For internal use in the compiler. It cannot appear in an AST parsed from a user-supplied string. */
+    case class InternalName(id: Identifier) extends expr
     case class List(elts: Seq[expr]) extends expr
+    case class InterpolatedStr(elts: Seq[expr]) extends expr
+
+    /**
+     * Implicit declaration of ordering, so expressions can be used for ordering operations, e.g.
+     * for `SortedMap.from(...)`
+     */
+    implicit val ExprIdentifierOrdering: Ordering[expr] = Ordering.by(_.toString)
   }
 
   sealed trait boolop

@@ -46,9 +46,6 @@ class CppCompiler(
   var accessMode: AccessMode = PublicAccess
 
   override def indent: String = "    "
-  override def outFileName(topClassName: String): String = topClassName
-  def outFileNameSource(className: String): String = outFileName(className) + ".cpp"
-  def outFileNameHeader(className: String): String = outFileName(className) + ".h"
 
   override def fileHeader(topClassName: String): Unit = {
     outSrcHeader.puts(s"// $headerComment")
@@ -65,12 +62,22 @@ class CppCompiler(
     outHdrHeader.puts
     outHdrHeader.puts(s"// $headerComment")
     outHdrHeader.puts
+    // Forward declaration of the top-level class defined later in this header
+    // file. It's important to do this before printing `importListHdr` because
+    // it contains `#include`s of header files of external .ksy modules that
+    // could circularly import this header file (which does nothing because of
+    // header guards, though, so if the other header files that tried to include
+    // this one refer to our top-level class by name, which is very likely, then
+    // we need to ensure that the C++ compiler has already seen the following
+    // forward declaration).
+    outHdrHeader.puts(s"class ${type2class(topClassName)};")
+    outHdrHeader.puts
 
     importListHdr.addKaitai("kaitai/kaitaistruct.h")
     importListHdr.addSystem("stdint.h")
 
     config.cppConfig.pointers match {
-      case SharedPointers | UniqueAndRawPointers =>
+      case UniqueAndRawPointers =>
         importListHdr.addSystem("memory")
       case RawPointers =>
         // no extra includes
@@ -108,21 +115,14 @@ class CppCompiler(
     }
   }
 
-  override def opaqueClassDeclaration(classSpec: ClassSpec): Unit = {
-    classForwardDeclaration(classSpec.name)
-    importListHdr.addLocal(outFileNameHeader(classSpec.name.head))
-  }
+  override def externalTypeDeclaration(extType: ExternalType): Unit =
+    importListHdr.addLocal(outFileNameHeader(extType.name.head))
 
   override def classHeader(name: List[String]): Unit = {
     val className = types2class(List(name.last))
 
-    val extraInherits = config.cppConfig.pointers match {
-      case RawPointers | UniqueAndRawPointers => ""
-      case SharedPointers => s", std::enable_shared_from_this<$className>"
-    }
-
     outHdr.puts
-    outHdr.puts(s"class $className : public $kstructName$extraInherits {")
+    outHdr.puts(s"class $className : public $kstructName {")
     outHdr.inc
     accessMode = PrivateAccess
     ensureMode(PublicAccess)
@@ -202,19 +202,9 @@ class CppCompiler(
     )
     outSrc.inc
 
-    // In shared pointers mode, this is required to be able to work with shared pointers to this
-    // in a constructor. This is obviously a hack and not a good practice.
-    // https://forum.libcinder.org/topic/solution-calling-shared-from-this-in-the-constructor
-    if (config.cppConfig.pointers == CppRuntimeConfig.SharedPointers) {
-      outSrc.puts(s"const auto weakPtrTrick = std::shared_ptr<$classNameBrief>(this, []($classNameBrief*){});")
-    }
-
     handleAssignmentSimple(ParentIdentifier, pParent)
     handleAssignmentSimple(RootIdentifier, if (name == rootClassName) {
-      config.cppConfig.pointers match {
-        case RawPointers | UniqueAndRawPointers => "this"
-        case SharedPointers => "shared_from_this()"
-      }
+      s"${pRoot} ? ${pRoot} : this"
     } else {
       pRoot
     })
@@ -335,7 +325,7 @@ class CppCompiler(
 
   override def attributeReader(attrName: Identifier, attrType: DataType, isNullable: Boolean): Unit = {
     ensureMode(PublicAccess)
-    outHdr.puts(s"${kaitaiType2NativeType(attrType.asNonOwning)} ${publicMemberName(attrName)}() const { return ${nonOwningPointer(attrName, attrType)}; }")
+    outHdr.puts(s"${kaitaiType2NativeType(attrType.asNonOwning())} ${publicMemberName(attrName)}() const { return ${nonOwningPointer(attrName, attrType)}; }")
   }
 
   override def universalDoc(doc: DocSpec): Unit = {
@@ -387,13 +377,13 @@ class CppCompiler(
       outSrc.inc
     }
 
-    val needRaw = this.needRaw(attr.dataType)
-    val innerType = attr.dataType match {
-      case st: SwitchType => st.combinedType
-      case t => t
+    (ExtraAttrs.forAttr(attr, this) ++ List(attr)).foreach { (attr) =>
+      val innerType = attr.dataType match {
+        case st: SwitchType => combineSwitchType(st)
+        case t => t
+      }
+      destructMember(attr.id, innerType, attr.isArray)
     }
-
-    destructMember(id, innerType, attr.isArray, needRaw)
 
     if (checks.nonEmpty) {
       outSrc.dec
@@ -401,73 +391,29 @@ class CppCompiler(
     }
   }
 
-  def destructMember(id: Identifier, innerType: DataType, isArray: Boolean, needRaw: NeedRaw): Unit = {
-    def destructWithSafeguardHeader(ptr: String): Unit = {
-      outSrc.puts(s"if ($ptr) {")
-      outSrc.inc
-    }
-    def destructWithSafeguardFooter(ptr: String): Unit = {
-      outSrc.puts(s"delete $ptr; $ptr = $nullPtr;")
-      outSrc.dec
-      outSrc.puts("}")
-    }
-    def destructWithSafeguardSimple(ptr: String): Unit = {
-      destructWithSafeguardHeader(ptr)
-      destructWithSafeguardFooter(ptr)
-    }
-    if (config.cppConfig.pointers == CppRuntimeConfig.RawPointers) {
-      if (isArray) {
-        // raw is std::vector<string>*, no need to delete its contents, but we
-        // need to clean up the vector pointer itself
-        if (needRaw.level >= 1) {
-          destructWithSafeguardSimple(privateMemberName(RawIdentifier(id)))
+  def destructMember(id: Identifier, innerType: DataType, isArray: Boolean): Unit = {
+    if (config.cppConfig.pointers != CppRuntimeConfig.RawPointers)
+      return
 
-          // IO is std::vector<kstream*>*, needs destruction of both members
-          // and the vector pointer itself
-          if (needRaw.hasIO) {
-            val ioVar = privateMemberName(IoStorageIdentifier(RawIdentifier(id)))
-            destructWithSafeguardHeader(ioVar)
-            destructVector(s"$kstreamName*", ioVar)
-            destructWithSafeguardFooter(ioVar)
-          }
-        }
-        if (needRaw.level >= 2) {
-          // m__raw__raw_* is also std::vector<string>*, we just clean up the vector pointer
-          destructWithSafeguardSimple(privateMemberName(RawIdentifier(RawIdentifier(id))))
-        }
+    val ptr = privateMemberName(id)
+    val innerNeedsDestruct = needsDestruction(innerType)
 
-        val arrVar = privateMemberName(id)
-        destructWithSafeguardHeader(arrVar)
+    if (!isArray && !innerNeedsDestruct)
+      return
 
-        // main member contents
-        if (needsDestruction(innerType)) {
-          // C++ specific substitution: AnyType results from generic struct + raw bytes
-          // so we would assume that only generic struct needs to be cleaned up
-          val realType = innerType match {
-            case AnyType => KaitaiStructType
-            case _ => innerType
-          }
+    outSrc.puts(s"if ($ptr) {")
+    outSrc.inc
 
-          destructVector(kaitaiType2NativeType(realType), arrVar)
-        }
+    if (isArray && innerNeedsDestruct)
+      destructVector(kaitaiType2NativeType(innerType), ptr)
 
-        // main member is a std::vector of something, always needs destruction
-        destructWithSafeguardFooter(arrVar)
-      } else {
-        // raw is just a string, no need to cleanup => we ignore `needRaw.hasRaw`
-
-        // but needRaw.hasIO is important
-        if (needRaw.hasIO)
-          destructWithSafeguardSimple(privateMemberName(IoStorageIdentifier(RawIdentifier(id))))
-
-        if (needsDestruction(innerType))
-          destructWithSafeguardSimple(privateMemberName(id))
-      }
-    }
+    outSrc.puts(s"delete $ptr; $ptr = $nullPtr;")
+    outSrc.dec
+    outSrc.puts("}")
   }
 
   def needsDestruction(t: DataType): Boolean = t match {
-    case _: UserType | _: ArrayTypeInStream | KaitaiStructType | AnyType => true
+    case _: UserType | _: ArrayTypeInStream | KaitaiStructType | AnyType | OwnedKaitaiStreamType => true
     case _ => false
   }
 
@@ -619,19 +565,13 @@ class CppCompiler(
     outSrc.puts("}")
   }
 
-  override def condRepeatEosHeader(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw): Unit = {
+  override def condRepeatInitAttr(id: Identifier, dataType: DataType): Unit = {
     importListHdr.addSystem("vector")
 
-    if (needRaw.level >= 1) {
-      outSrc.puts(s"${privateMemberName(RawIdentifier(id))} = ${newVector(CalcBytesType)};")
-      if (needRaw.hasIO) {
-        outSrc.puts(s"${privateMemberName(IoStorageIdentifier(RawIdentifier(id)))} = ${newVector(OwnedKaitaiStreamType)};")
-      }
-    }
-    if (needRaw.level >= 2) {
-      outSrc.puts(s"${privateMemberName(RawIdentifier(RawIdentifier(id)))} = ${newVector(CalcBytesType)};")
-    }
     outSrc.puts(s"${privateMemberName(id)} = ${newVector(dataType)};")
+  }
+
+  override def condRepeatEosHeader(id: Identifier, io: String, dataType: DataType): Unit = {
     outSrc.puts("{")
     outSrc.inc
     outSrc.puts("int i = 0;")
@@ -651,58 +591,26 @@ class CppCompiler(
     outSrc.puts("}")
   }
 
-  override def condRepeatExprHeader(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw, repeatExpr: Ast.expr): Unit = {
-    importListHdr.addSystem("vector")
-
+  override def condRepeatExprHeader(id: Identifier, io: String, dataType: DataType, repeatExpr: Ast.expr): Unit = {
     val lenVar = s"l_${idToStr(id)}"
-    outSrc.puts(s"int $lenVar = ${expression(repeatExpr)};")
-    if (needRaw.level >= 1) {
-      val rawId = privateMemberName(RawIdentifier(id))
-      outSrc.puts(s"$rawId = ${newVector(CalcBytesType)};")
-      outSrc.puts(s"$rawId->reserve($lenVar);")
-      if (needRaw.hasIO) {
-        val ioId = privateMemberName(IoStorageIdentifier(RawIdentifier(id)))
-        outSrc.puts(s"$ioId = ${newVector(OwnedKaitaiStreamType)};")
-        outSrc.puts(s"$ioId->reserve($lenVar);")
-      }
-    }
-    if (needRaw.level >= 2) {
-      val rawId = privateMemberName(RawIdentifier(RawIdentifier(id)))
-      outSrc.puts(s"$rawId = ${newVector(CalcBytesType)};")
-      outSrc.puts(s"$rawId->reserve($lenVar);")
-    }
-    outSrc.puts(s"${privateMemberName(id)} = ${newVector(dataType)};")
-    outSrc.puts(s"${privateMemberName(id)}->reserve($lenVar);")
+    outSrc.puts(s"const int $lenVar = ${expression(repeatExpr)};")
     outSrc.puts(s"for (int i = 0; i < $lenVar; i++) {")
     outSrc.inc
   }
 
-  override def handleAssignmentRepeatExpr(id: Identifier, expr: String): Unit = {
-    outSrc.puts(s"${privateMemberName(id)}->push_back(${stdMoveWrap(expr)});")
-  }
+  override def handleAssignmentRepeatExpr(id: Identifier, expr: String): Unit =
+    handleAssignmentRepeatEos(id, expr)
 
   override def condRepeatExprFooter: Unit = {
     outSrc.dec
     outSrc.puts("}")
   }
 
-  override def condRepeatUntilHeader(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw, untilExpr: expr): Unit = {
-    importListHdr.addSystem("vector")
-
-    if (needRaw.level >= 1) {
-      outSrc.puts(s"${privateMemberName(RawIdentifier(id))} = ${newVector(CalcBytesType)};")
-      if (needRaw.hasIO) {
-        outSrc.puts(s"${privateMemberName(IoStorageIdentifier(RawIdentifier(id)))} = ${newVector(OwnedKaitaiStreamType)};")
-      }
-    }
-    if (needRaw.level >= 2) {
-      outSrc.puts(s"${privateMemberName(RawIdentifier(RawIdentifier(id)))} = ${newVector(CalcBytesType)};")
-    }
-    outSrc.puts(s"${privateMemberName(id)} = ${newVector(dataType)};")
+  override def condRepeatUntilHeader(id: Identifier, io: String, dataType: DataType, untilExpr: expr): Unit = {
     outSrc.puts("{")
     outSrc.inc
     outSrc.puts("int i = 0;")
-    outSrc.puts(s"${kaitaiType2NativeType(dataType.asNonOwning)} ${translator.doName("_")};")
+    outSrc.puts(s"${kaitaiType2NativeType(dataType.asNonOwning())} ${translator.doName("_")};")
     outSrc.puts("do {")
     outSrc.inc
   }
@@ -732,7 +640,7 @@ class CppCompiler(
     outSrc.puts(s"${privateMemberName(id)}->push_back($wrappedTempVar);")
   }
 
-  override def condRepeatUntilFooter(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw, untilExpr: expr): Unit = {
+  override def condRepeatUntilFooter(id: Identifier, io: String, dataType: DataType, untilExpr: expr): Unit = {
     typeProvider._currentIteratorType = Some(dataType)
     outSrc.puts("i++;")
     outSrc.dec
@@ -766,24 +674,25 @@ class CppCompiler(
       case _: BytesEosType =>
         s"$io->read_bytes_full()"
       case BytesTerminatedType(terminator, include, consume, eosError, _) =>
-        s"$io->read_bytes_term($terminator, $include, $consume, $eosError)"
+        if (terminator.length == 1) {
+          val term = terminator.head & 0xff
+          s"$io->read_bytes_term($term, $include, $consume, $eosError)"
+        } else {
+          s"$io->read_bytes_term_multi(${translator.doByteArrayLiteral(terminator)}, $include, $consume, $eosError)"
+        }
       case BitsType1(bitEndian) =>
         s"$io->read_bits_int_${bitEndian.toSuffix}(1)"
       case BitsType(width: Int, bitEndian) =>
         s"$io->read_bits_int_${bitEndian.toSuffix}($width)"
       case t: UserType =>
         val addParams = Utils.join(t.args.map((a) => translator.translate(a)), "", ", ", ", ")
-        val addArgs = if (t.isOpaque) {
+        val addArgs = if (t.isExternal(typeProvider.nowClass)) {
           ""
         } else {
           val parent = t.forcedParent match {
             case Some(USER_TYPE_NO_PARENT) => nullPtr
             case Some(fp) => translator.translate(fp)
-            case None =>
-              config.cppConfig.pointers match {
-                case RawPointers | UniqueAndRawPointers => "this"
-                case SharedPointers => s"shared_from_this()"
-              }
+            case None => "this"
           }
           val addEndian = t.classSpec.get.meta.endian match {
             case Some(InheritedEndian) => ", m__is_le"
@@ -794,8 +703,6 @@ class CppCompiler(
         config.cppConfig.pointers match {
           case RawPointers =>
             s"new ${types2class(t.name)}($addParams$io$addArgs)"
-          case SharedPointers =>
-            s"std::make_shared<${types2class(t.name)}>($addParams$io$addArgs)"
           case UniqueAndRawPointers =>
             // C++14
             //s"std::make_unique<${types2class(t.name)}>($addParams$io$addArgs)"
@@ -815,13 +722,19 @@ class CppCompiler(
     }
   }
 
-  override def bytesPadTermExpr(expr0: String, padRight: Option[Int], terminator: Option[Int], include: Boolean) = {
+  override def bytesPadTermExpr(expr0: String, padRight: Option[Int], terminator: Option[Seq[Byte]], include: Boolean) = {
     val expr1 = padRight match {
       case Some(padByte) => s"$kstreamName::bytes_strip_right($expr0, $padByte)"
       case None => expr0
     }
     val expr2 = terminator match {
-      case Some(term) => s"$kstreamName::bytes_terminate($expr1, $term, $include)"
+      case Some(term) =>
+        if (term.length == 1) {
+          val t = term.head & 0xff
+          s"$kstreamName::bytes_terminate($expr1, $t, $include)"
+        } else {
+          s"$kstreamName::bytes_terminate_multi($expr1, ${translator.doByteArrayLiteral(term)}, $include)"
+        }
       case None => expr1
     }
     expr2
@@ -918,10 +831,10 @@ class CppCompiler(
 
   override def instanceHeader(className: List[String], instName: InstanceIdentifier, dataType: DataType, isNullable: Boolean): Unit = {
     ensureMode(PublicAccess)
-    outHdr.puts(s"${kaitaiType2NativeType(dataType.asNonOwning)} ${publicMemberName(instName)}();")
+    outHdr.puts(s"${kaitaiType2NativeType(dataType.asNonOwning())} ${publicMemberName(instName)}();")
 
     outSrc.puts
-    outSrc.puts(s"${kaitaiType2NativeType(dataType.asNonOwning, true)} ${types2class(className)}::${publicMemberName(instName)}() {")
+    outSrc.puts(s"${kaitaiType2NativeType(dataType.asNonOwning(), true)} ${types2class(className)}::${publicMemberName(instName)}() {")
     outSrc.inc
   }
 
@@ -940,6 +853,27 @@ class CppCompiler(
   override def instanceReturn(instName: InstanceIdentifier, attrType: DataType): Unit =
     outSrc.puts(s"return ${nonOwningPointer(instName, attrType)};")
 
+  override def instanceCalculate(instName: Identifier, dataType: DataType, value: Ast.expr): Unit = {
+    if (attrDebugNeeded(instName))
+      attrDebugStart(instName, dataType, None, NoRepeat)
+    val valExpr = expression(value)
+    val isOwningInExpr = dataType match {
+      case ct: ComplexDataType => ct.isOwningInExpr
+      case _ => false
+    }
+    val valExprConverted = if (isOwningInExpr) {
+      config.cppConfig.pointers match {
+        case RawPointers =>
+          valExpr
+        case UniqueAndRawPointers =>
+          s"$valExpr.get()"
+      }
+    } else {
+      valExpr
+    }
+    handleAssignmentSimple(instName, valExprConverted)
+  }
+
   override def enumDeclaration(curClass: List[String], enumName: String, enumColl: Seq[(Long, EnumValueSpec)]): Unit = {
     val enumClass = types2class(List(enumName))
 
@@ -949,16 +883,38 @@ class CppCompiler(
 
     if (enumColl.size > 1) {
       enumColl.dropRight(1).foreach { case (id, label) =>
-        outHdr.puts(s"${value2Const(enumName, label.name)} = $id,")
+        outHdr.puts(s"${value2Const(enumName, label.name)} = ${translator.doIntLiteral(id)},")
       }
     }
     enumColl.last match {
       case (id, label) =>
-        outHdr.puts(s"${value2Const(enumName, label.name)} = $id")
+        outHdr.puts(s"${value2Const(enumName, label.name)} = ${translator.doIntLiteral(id)}")
     }
 
     outHdr.dec
     outHdr.puts("};")
+  }
+
+  override def classToString(toStringExpr: Ast.expr): Unit = {
+    ensureMode(PublicAccess)
+    // _to_string() method
+    outHdr.puts(s"std::string _to_string() const;")
+    outSrc.puts
+    outSrc.puts(s"std::string ${types2class(typeProvider.nowClass.name)}::_to_string() const {")
+    outSrc.inc
+    outSrc.puts(s"return ${translator.translate(toStringExpr)};")
+    outSrc.dec
+    outSrc.puts("}")
+
+    // operator<< that trivially calls ._to_string()
+    outHdr.puts(s"friend std::ostream& operator<<(std::ostream& os, const ${types2class(typeProvider.nowClass.name)}& obj);")
+    outSrc.puts
+    outSrc.puts(s"std::ostream& operator<<(std::ostream& os, const ${types2class(typeProvider.nowClass.name)}& obj) {")
+    outSrc.inc
+    outSrc.puts("os << obj._to_string();")
+    outSrc.puts("return os;")
+    outSrc.dec
+    outSrc.puts("}")
   }
 
   def value2Const(enumName: String, label: String) = Utils.upperUnderscoreCase(enumName + "_" + label)
@@ -985,20 +941,12 @@ class CppCompiler(
   def nullFlagForName(ksName: Identifier) =
     s"n_${idToStr(ksName)}"
 
-  override def idToStr(id: Identifier): String = {
-    id match {
-      case RawIdentifier(inner) => s"_raw_${idToStr(inner)}"
-      case IoStorageIdentifier(inner) => s"_io_${idToStr(inner)}"
-      case si: SpecialIdentifier => Utils.lowerUnderscoreCase(si.name)
-      case ni: NamedIdentifier => Utils.lowerUnderscoreCase(ni.name)
-      case NumberedIdentifier(idx) => s"_${NumberedIdentifier.TEMPLATE}$idx"
-      case ni: InstanceIdentifier => Utils.lowerUnderscoreCase(ni.name)
-    }
-  }
-
-  override def privateMemberName(id: Identifier): String = s"m_${idToStr(id)}"
+  override def idToStr(id: Identifier): String = CppCompiler.idToStr(id)
 
   override def publicMemberName(id: Identifier): String = idToStr(id)
+
+  override def privateMemberName(id: Identifier): String = CppCompiler.privateMemberName(id)
+
 
   override def localTemporaryName(id: Identifier): String = s"_t_${idToStr(id)}"
 
@@ -1016,11 +964,11 @@ class CppCompiler(
   override def type2class(className: String): String = CppCompiler.type2class(className)
 
   def kaitaiType2NativeType(attrType: DataType, absolute: Boolean = false): String =
-    CppCompiler.kaitaiType2NativeType(config.cppConfig, attrType, absolute)
+    CppCompiler.kaitaiType2NativeType(config.cppConfig, importListHdr, attrType, absolute)
 
   def nullPtr: String = config.cppConfig.pointers match {
     case RawPointers => "0"
-    case SharedPointers | UniqueAndRawPointers => "nullptr"
+    case UniqueAndRawPointers => "nullptr"
   }
 
   def nonOwningPointer(attrName: Identifier, attrType: DataType): String = {
@@ -1051,6 +999,7 @@ class CppCompiler(
   override def ksErrorName(err: KSError): String = err match {
     case EndOfStreamError => "std::ifstream::failure"
     case UndecidedEndiannessError => "kaitai::undecided_endianness_error"
+    case ConversionError => "std::invalid_argument"
     case validationErr: ValidationError =>
       val cppType = kaitaiType2NativeType(validationErr.dt, true)
       val cppErrName = validationErr match {
@@ -1087,10 +1036,26 @@ object CppCompiler extends LanguageCompilerStatic
     config: RuntimeConfig
   ): LanguageCompiler = new CppCompiler(tp, config)
 
+  def typeToFileName(topClassName: String): String = topClassName
+  def outFileNameSource(className: String): String = typeToFileName(className) + ".cpp"
+  def outFileNameHeader(className: String): String = typeToFileName(className) + ".h"
+
+  def idToStr(id: Identifier): String =
+    id match {
+      case SpecialIdentifier(name) => Utils.lowerUnderscoreCase(name)
+      case NamedIdentifier(name) => Utils.lowerUnderscoreCase(name)
+      case NumberedIdentifier(idx) => s"_${NumberedIdentifier.TEMPLATE}$idx"
+      case InstanceIdentifier(name) => Utils.lowerUnderscoreCase(name)
+      case RawIdentifier(inner) => s"_raw_${idToStr(inner)}"
+      case IoStorageIdentifier(inner) => s"_io_${idToStr(inner)}"
+    }
+
+  def privateMemberName(id: Identifier): String = s"m_${idToStr(id)}"
+
   override def kstructName = "kaitai::kstruct"
   override def kstreamName = "kaitai::kstream"
 
-  def kaitaiType2NativeType(config: CppRuntimeConfig, attrType: DataType, absolute: Boolean = false): String = {
+  def kaitaiType2NativeType(config: CppRuntimeConfig, importListHdr: CppImportList, attrType: DataType, absolute: Boolean = false): String = {
     attrType match {
       case Int1Type(false) => "uint8_t"
       case IntMultiType(false, Width2, _) => "uint16_t"
@@ -1122,7 +1087,6 @@ object CppCompiler extends LanguageCompilerStatic
         })
         config.pointers match {
           case RawPointers => s"$typeStr*"
-          case SharedPointers => s"std::shared_ptr<$typeStr>"
           case UniqueAndRawPointers =>
             if (t.isOwning) s"std::unique_ptr<$typeStr>" else s"$typeStr*"
         }
@@ -1134,11 +1098,16 @@ object CppCompiler extends LanguageCompilerStatic
           t.name
         })
 
-      case ArrayTypeInStream(inType) => config.pointers match {
-        case RawPointers => s"std::vector<${kaitaiType2NativeType(config, inType, absolute)}>*"
-        case UniqueAndRawPointers => s"std::unique_ptr<std::vector<${kaitaiType2NativeType(config, inType, absolute)}>>"
+      case at: ArrayType => {
+        importListHdr.addSystem("vector")
+        val vecType = s"std::vector<${kaitaiType2NativeType(config, importListHdr, at.elType, absolute)}>"
+        (at, config.pointers) match {
+          case (_: ArrayTypeInStream, UniqueAndRawPointers) =>
+            s"std::unique_ptr<$vecType>"
+          case _ =>
+            s"$vecType*"
+        }
       }
-      case CalcArrayType(inType) => s"std::vector<${kaitaiType2NativeType(config, inType, absolute)}>*"
       case OwnedKaitaiStreamType => config.pointers match {
         case RawPointers => s"$kstreamName*"
         case UniqueAndRawPointers => s"std::unique_ptr<$kstreamName>"
@@ -1146,17 +1115,12 @@ object CppCompiler extends LanguageCompilerStatic
       case KaitaiStreamType => s"$kstreamName*"
       case KaitaiStructType => config.pointers match {
         case RawPointers => s"$kstructName*"
-        case SharedPointers => s"std::shared_ptr<$kstructName>"
         case UniqueAndRawPointers => s"std::unique_ptr<$kstructName>"
       }
-      case CalcKaitaiStructType => config.pointers match {
-        case RawPointers => s"$kstructName*"
-        case SharedPointers => s"std::shared_ptr<$kstructName>"
-        case UniqueAndRawPointers => s"$kstructName*"
-      }
+      case CalcKaitaiStructType(_) => s"$kstructName*"
 
       case st: SwitchType =>
-        kaitaiType2NativeType(config, combineSwitchType(st), absolute)
+        kaitaiType2NativeType(config, importListHdr, combineSwitchType(st), absolute)
     }
   }
 
@@ -1180,7 +1144,7 @@ object CppCompiler extends LanguageCompilerStatic
     if (st.isOwning) {
       ct1
     } else {
-      ct1.asNonOwning
+      ct1.asNonOwning()
     }
   }
 

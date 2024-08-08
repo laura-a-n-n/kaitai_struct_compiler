@@ -31,8 +31,9 @@ trait EveryReadIsExpression
     assignTypeOpt: Option[DataType] = None
   ): Unit = {
     val assignType = assignTypeOpt.getOrElse(dataType)
+    val needsDebug = attrDebugNeeded(id) && rep != NoRepeat
 
-    if (config.readStoresPos && rep != NoRepeat)
+    if (needsDebug)
       attrDebugStart(id, dataType, Some(io), rep)
 
     dataType match {
@@ -51,17 +52,17 @@ trait EveryReadIsExpression
 
         attrSwitchTypeParse(id, st.on, st.cases, io, rep, defEndian, isNullable, st.combinedType)
       case t: StrFromBytesType =>
-        val expr = translator.bytesToStr(parseExprBytes(t.bytes, io), Ast.expr.Str(t.encoding))
+        val expr = translator.bytesToStr(parseExprBytes(t.bytes, io), t.encoding)
         handleAssignment(id, expr, rep, isRaw)
       case t: EnumType =>
-        val expr = translator.doEnumById(t.enumSpec.get.name, parseExpr(t.basedOn, t.basedOn, io, defEndian))
+        val expr = translator.doEnumById(t.enumSpec.get, parseExpr(t.basedOn, t.basedOn, io, defEndian))
         handleAssignment(id, expr, rep, isRaw)
       case _ =>
         val expr = parseExpr(dataType, assignType, io, defEndian)
         handleAssignment(id, expr, rep, isRaw)
     }
 
-    if (config.readStoresPos && rep != NoRepeat)
+    if (needsDebug)
       attrDebugEnd(id, dataType, io, rep)
   }
 
@@ -103,22 +104,7 @@ trait EveryReadIsExpression
     val newIO = dataType match {
       case knownSizeType: UserTypeFromBytes =>
         // we have a fixed buffer, thus we shall create separate IO for it
-        val rawId = RawIdentifier(id)
-        val byteType = knownSizeType.bytes
-
-        attrParse2(rawId, byteType, io, rep, true, defEndian)
-
-        val extraType = rep match {
-          case NoRepeat => byteType
-          case _ => ArrayTypeInStream(byteType)
-        }
-
-        this match {
-          case thisStore: AllocateAndStoreIO =>
-            thisStore.allocateIO(rawId, rep)
-          case thisLocal: AllocateIOLocalVar =>
-            thisLocal.allocateIO(rawId, rep)
-        }
+        createSubstream(id, knownSizeType.bytes, io, rep, defEndian)
       case _: UserTypeInstream =>
         // no fixed buffer, just use regular IO
         io
@@ -138,9 +124,78 @@ trait EveryReadIsExpression
         case _ =>
           val tempVarName = localTemporaryName(id)
           handleAssignmentTempVar(dataType, tempVarName, expr)
-          userTypeDebugRead(tempVarName, dataType, assignType)
           handleAssignment(id, tempVarName, rep, false)
+          userTypeDebugRead(tempVarName, dataType, assignType)
       }
+    }
+  }
+
+  /**
+    * Creates a substream for a specific member `id`. A substream will be using underlying bytes
+    * type `byteType`, repeat specification `rep` and default endianness of `defEndian`.
+    *
+    * @param id
+    * @param byteType underlying bytes type
+    * @param io parent stream to derive substream from
+    * @param rep repeat specification for underlying bytes type
+    * @param defEndian default endianness specification
+    * @return string reference to a freshly created substream
+    */
+  def createSubstream(id: Identifier, bt: BytesType, io: String, rep: RepeatSpec, defEndian: Option[FixedEndian]): String = {
+    if (config.zeroCopySubstream) {
+      bt match {
+        case blt @ BytesLimitType(_, None, _, None, None)   =>
+          createSubstreamFixedSize(id, blt, io, rep, defEndian)
+        case _ =>
+          // fall back to buffered implementation
+          createSubstreamBuffered(id, bt, io, rep, defEndian)
+      }
+    } else {
+      // if zero-copy substreams were declined, always use buffered implementation
+      createSubstreamBuffered(id, bt, io, rep, defEndian)
+    }
+  }
+
+  /**
+    * Creates a substream for a specific member `id` of fixed sized `sizeExpr`, based off a parent
+    * stream of `io`.
+    *
+    * Default implementation just short-circuits this to `createSubstreamBuffered`, which is an
+    * inefficient, but guaranteed to work implementation.
+    *
+    * @param id identifier of a member that this stream is for
+    * @param sizeExpr expression designating size of substream in bytes
+    * @param io parent stream to derive substream from
+    * @return string reference to a freshly created substream
+    */
+  def createSubstreamFixedSize(id: Identifier, blt: BytesLimitType, io: String, rep: RepeatSpec, defEndian: Option[FixedEndian]): String =
+    createSubstreamBuffered(id, blt, io, rep, defEndian)
+
+  /**
+    * Creates a substream by reading bytes that will comprise the stream first into a buffer in
+    * memory, and then wrapping that buffer as a new stream.
+    * @param id identifier of a member that this stream is for
+    * @param byteType underlying bytes type
+    * @param io parent stream to derive substream from
+    * @param rep repeat specification for underlying bytes type
+    * @param defEndian default endianness specification
+    * @return string reference to a freshly created substream
+    */
+  def createSubstreamBuffered(id: Identifier, byteType: BytesType, io: String, rep: RepeatSpec, defEndian: Option[FixedEndian]): String = {
+    val rawId = RawIdentifier(id)
+
+    attrParse2(rawId, byteType, io, rep, true, defEndian)
+
+    val extraType = rep match {
+      case NoRepeat => byteType
+      case _ => ArrayTypeInStream(byteType)
+    }
+
+    this match {
+      case thisStore: AllocateAndStoreIO =>
+        thisStore.allocateIO(rawId, rep)
+      case thisLocal: AllocateIOLocalVar =>
+        thisLocal.allocateIO(rawId, rep)
     }
   }
 
@@ -192,12 +247,22 @@ trait EveryReadIsExpression
   def handleAssignmentTempVar(dataType: DataType, id: String, expr: String): Unit = ???
 
   def parseExpr(dataType: DataType, assignType: DataType, io: String, defEndian: Option[FixedEndian]): String
-  def bytesPadTermExpr(expr0: String, padRight: Option[Int], terminator: Option[Int], include: Boolean): String
+  def bytesPadTermExpr(expr0: String, padRight: Option[Int], terminator: Option[Seq[Byte]], include: Boolean): String
   def userTypeDebugRead(id: String, dataType: DataType, assignType: DataType): Unit = ???
 
   def instanceCalculate(instName: Identifier, dataType: DataType, value: Ast.expr): Unit = {
-    if (config.readStoresPos)
+    if (attrDebugNeeded(instName))
       attrDebugStart(instName, dataType, None, NoRepeat)
     handleAssignmentSimple(instName, expression(value))
+  }
+
+  override def attrDebugNeeded(attrId: Identifier): Boolean = {
+    if (!config.readStoresPos)
+      return false
+
+    attrId match {
+      case _: NamedIdentifier | _: NumberedIdentifier | _: InstanceIdentifier => true
+      case _ => super.attrDebugNeeded(attrId)
+    }
   }
 }

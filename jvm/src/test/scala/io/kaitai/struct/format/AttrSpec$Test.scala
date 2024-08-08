@@ -5,10 +5,10 @@ import io.kaitai.struct.exprlang.Ast
 import io.kaitai.struct.format
 import io.kaitai.struct.formats.JavaKSYParser
 import io.kaitai.struct.problems.CompilationProblemException
-import org.scalatest.FunSpec
-import org.scalatest.Matchers._
+import org.scalatest.funspec.AnyFunSpec
+import org.scalatest.matchers.should.Matchers._
 
-class AttrSpec$Test extends FunSpec {
+class AttrSpec$Test extends AnyFunSpec {
   def tryOne(yamlStr: String) = AttrSpec.parseContentSpec(JavaKSYParser.stringToYaml(yamlStr), List("test"))
 
   describe("AttrSpec.parseContentSpec") {
@@ -56,17 +56,23 @@ class AttrSpec$Test extends FunSpec {
 
     it ("fails to parse double") {
       the [CompilationProblemException] thrownBy tryOne("1.234") should
-        have message("/test: error: unable to parse fixed content: 1.234")
+        have message("""(main): /test:
+                       |	error: unable to parse fixed content: 1.234
+                       |""".stripMargin)
     }
 
     it ("fails to parse map") {
       the [CompilationProblemException] thrownBy tryOne("foo: 123") should
-        have message("/test: error: unable to parse fixed content: Map(foo -> 123)")
+        have message("""(main): /test:
+                       |	error: unable to parse fixed content: Map(foo -> 123)
+                       |""".stripMargin)
     }
 
     it ("fails to parse bogus array element") {
       the [CompilationProblemException] thrownBy tryOne("[1, 2, [3]]") should
-        have message("/test/2: error: unable to parse fixed content in array: List(3)")
+        have message("""(main): /test/2:
+                       |	error: unable to parse fixed content in array: List(3)
+                       |""".stripMargin)
     }
   }
 

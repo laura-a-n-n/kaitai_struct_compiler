@@ -5,6 +5,7 @@ import io.kaitai.struct.datatype.DataType._
 import io.kaitai.struct.exprlang.Ast
 import io.kaitai.struct.problems.KSYParseError
 
+import scala.collection.immutable.SortedMap
 import scala.collection.mutable
 
 /**
@@ -14,11 +15,22 @@ import scala.collection.mutable
 sealed trait ClassSpecLike {
   def toDataType: DataType
 }
+/**
+  * Type was not yet calculated. If that type returned during calculation, then
+  * cyclic reference is present and it is impossible to calculate actual type.
+  *
+  * Parent type of each KSY-defined type initialized to that value and refined
+  * later based on type usage.
+  */
 case object UnknownClassSpec extends ClassSpecLike {
-  override def toDataType: DataType = CalcKaitaiStructType
+  override def toDataType: DataType = CalcKaitaiStructType()
 }
+/**
+  * Type is calculated as a type that able to store any KSY-defined type.
+  * Usually it have a name `KaitaiStruct` in corresponding language runtime library.
+  */
 case object GenericStructClassSpec extends ClassSpecLike {
-  override def toDataType: DataType = CalcKaitaiStructType
+  override def toDataType: DataType = CalcKaitaiStructType()
 }
 
 sealed trait Sized
@@ -36,9 +48,9 @@ case class ClassSpec(
   toStringExpr: Option[Ast.expr],
   params: List[ParamDefSpec],
   seq: List[AttrSpec],
-  types: Map[String, ClassSpec],
-  instances: Map[InstanceIdentifier, InstanceSpec],
-  enums: Map[String, EnumSpec]
+  types: SortedMap[String, ClassSpec],
+  instances: SortedMap[InstanceIdentifier, InstanceSpec],
+  enums: SortedMap[String, EnumSpec]
 ) extends ClassSpecLike with YAMLPath {
   var parentClass: ClassSpecLike = UnknownClassSpec
 
@@ -76,6 +88,16 @@ case class ClassSpec(
   }
 
   def parentType: DataType = parentClass.toDataType
+
+  /**
+    * Determines whether this `ClassSpec` represents a type that is external
+    * (i.e. not defined in the same .ksy file) from the perspective of the given
+    * `ClassSpec`.
+    * @param curClass class spec from which the local/external relationship
+    * should be evaluated
+    */
+  def isExternal(curClass: ClassSpec): Boolean =
+    name.head != curClass.name.head
 
   /**
     * Recursively traverses tree of types starting from this type, calling
@@ -154,20 +176,21 @@ object ClassSpec {
       case Some(value) => seqFromYaml(value, path ++ List("seq"), meta)
       case None => List()
     }
-    val types: Map[String, ClassSpec] = srcMap.get("types") match {
-      case Some(value) => typesFromYaml(value, fileName, path ++ List("types"), meta)
-      case None => Map()
-    }
-    val instances: Map[InstanceIdentifier, InstanceSpec] = srcMap.get("instances") match {
+    val instances: SortedMap[InstanceIdentifier, InstanceSpec] = srcMap.get("instances") match {
       case Some(value) => instancesFromYaml(value, path ++ List("instances"), meta)
-      case None => Map()
-    }
-    val enums: Map[String, EnumSpec] = srcMap.get("enums") match {
-      case Some(value) => enumsFromYaml(value, path ++ List("enums"))
-      case None => Map()
+      case None => SortedMap()
     }
 
-    checkDupSeqInstIds(seq, instances)
+    checkDupMemberIds(params ++ seq ++ instances.values)
+
+    val types: SortedMap[String, ClassSpec] = srcMap.get("types") match {
+      case Some(value) => typesFromYaml(value, fileName, path ++ List("types"), meta)
+      case None => SortedMap()
+    }
+    val enums: SortedMap[String, EnumSpec] = srcMap.get("enums") match {
+      case Some(value) => enumsFromYaml(value, path ++ List("enums"))
+      case None => SortedMap()
+    }
 
     val cs = ClassSpec(
       fileName, path, path.isEmpty,
@@ -179,7 +202,7 @@ object ClassSpec {
     if (path.isEmpty) {
       explicitMeta.id match {
         case None =>
-          throw KSYParseError.withText("no `meta/id` encountered in top-level class spec", path ++ List("meta", "id"))
+          throw KSYParseError.withText("no `meta/id` encountered in top-level class spec", path ++ List("meta"))
         case Some(id) =>
           cs.name = List(id)
       }
@@ -194,7 +217,6 @@ object ClassSpec {
         val params = srcList.zipWithIndex.map { case (attrSrc, idx) =>
           ParamDefSpec.fromYaml(attrSrc, path ++ List(idx.toString), idx)
         }
-        // FIXME: checkDupSeqIds(params)
         params
       case unknown =>
         throw KSYParseError.withText(s"expected array, found $unknown", path)
@@ -207,37 +229,28 @@ object ClassSpec {
         val seq = srcList.zipWithIndex.map { case (attrSrc, idx) =>
           AttrSpec.fromYaml(attrSrc, path ++ List(idx.toString), metaDef, idx)
         }
-        checkDupSeqIds(seq)
         seq
       case unknown =>
         throw KSYParseError.withText(s"expected array, found $unknown", path)
     }
   }
 
-  def checkDupSeqIds(seq: List[AttrSpec]): Unit = {
-    val attrIds = mutable.Map[String, AttrSpec]()
-    seq.foreach { (attr) =>
-      attr.id match {
-        case NamedIdentifier(id) =>
-          checkDupId(attrIds.get(id), id, attr)
-          attrIds.put(id, attr)
-        case _ => // do nothing with non-named IDs
+  def checkDupMemberIds(attrs: List[MemberSpec]): Unit = {
+    val attrIds = mutable.Map[String, MemberSpec]()
+    attrs.foreach { (attr) =>
+      val idOpt: Option[String] = attr.id match {
+        case NamedIdentifier(name) => Some(name)
+        case InstanceIdentifier(name) => Some(name)
+        case _ => None // do nothing with non-named IDs
+      }
+      idOpt.foreach { (id) =>
+        checkDupId(attrIds.get(id), id, attr)
+        attrIds.put(id, attr)
       }
     }
   }
 
-  def checkDupSeqInstIds(seq: List[AttrSpec], instances: Map[InstanceIdentifier, InstanceSpec]): Unit = {
-    val attrIds: Map[String, AttrSpec] = seq.flatMap((attr) => attr.id match {
-      case NamedIdentifier(id) => Some(id -> attr)
-      case _ => None
-    }).toMap
-
-    instances.foreach { case (id, instSpec) =>
-      checkDupId(attrIds.get(id.name), id.name, instSpec)
-    }
-  }
-
-  private def checkDupId(prevAttrOpt: Option[AttrSpec], id: String, nowAttr: YAMLPath) {
+  private def checkDupId(prevAttrOpt: Option[MemberSpec], id: String, nowAttr: YAMLPath): Unit = {
     prevAttrOpt match {
       case Some(prevAttr) =>
         throw KSYParseError.withText(
@@ -249,31 +262,37 @@ object ClassSpec {
     }
   }
 
-  def typesFromYaml(src: Any, fileName: Option[String], path: List[String], metaDef: MetaSpec): Map[String, ClassSpec] = {
+  def typesFromYaml(src: Any, fileName: Option[String], path: List[String], metaDef: MetaSpec): SortedMap[String, ClassSpec] = {
     val srcMap = ParseUtils.asMapStr(src, path)
-    srcMap.map { case (typeName, body) =>
-      Identifier.checkIdentifierSource(typeName, "type", path ++ List(typeName))
-      typeName -> ClassSpec.fromYaml(body, fileName, path ++ List(typeName), metaDef)
-    }
+    SortedMap.from(
+      srcMap.map { case (typeName, body) =>
+        Identifier.checkIdentifierSource(typeName, "type", path ++ List(typeName))
+        typeName -> ClassSpec.fromYaml(body, fileName, path ++ List(typeName), metaDef)
+      }
+    )
   }
 
-  def instancesFromYaml(src: Any, path: List[String], metaDef: MetaSpec): Map[InstanceIdentifier, InstanceSpec] = {
+  def instancesFromYaml(src: Any, path: List[String], metaDef: MetaSpec): SortedMap[InstanceIdentifier, InstanceSpec] = {
     val srcMap = ParseUtils.asMap(src, path)
-    srcMap.map { case (key, body) =>
-      val instName = ParseUtils.asStr(key, path)
-      Identifier.checkIdentifierSource(instName, "instance", path ++ List(instName))
-      val id = InstanceIdentifier(instName)
-      id -> InstanceSpec.fromYaml(body, path ++ List(instName), metaDef, id)
-    }
+    SortedMap.from(
+      srcMap.map { case (key, body) =>
+        val instName = ParseUtils.asStr(key, path)
+        Identifier.checkIdentifierSource(instName, "instance", path ++ List(instName))
+        val id = InstanceIdentifier(instName)
+        id -> InstanceSpec.fromYaml(body, path ++ List(instName), metaDef, id)
+      }
+    )
   }
 
-  def enumsFromYaml(src: Any, path: List[String]): Map[String, EnumSpec] = {
+  def enumsFromYaml(src: Any, path: List[String]): SortedMap[String, EnumSpec] = {
     val srcMap = ParseUtils.asMap(src, path)
-    srcMap.map { case (key, body) =>
-      val enumName = ParseUtils.asStr(key, path)
-      Identifier.checkIdentifierSource(enumName, "enum", path ++ List(enumName))
-      enumName -> EnumSpec.fromYaml(body, path ++ List(enumName))
-    }
+    SortedMap.from(
+      srcMap.map { case (key, body) =>
+        val enumName = ParseUtils.asStr(key, path)
+        Identifier.checkIdentifierSource(enumName, "enum", path ++ List(enumName))
+        enumName -> EnumSpec.fromYaml(body, path ++ List(enumName))
+      }
+    )
   }
 
   def fromYaml(src: Any, fileName: Option[String]): ClassSpec = fromYaml(src, fileName, List(), MetaSpec.OPAQUE)
@@ -288,9 +307,9 @@ object ClassSpec {
       toStringExpr = None,
       params = List(),
       seq = List(),
-      types = Map(),
-      instances = Map(),
-      enums = Map()
+      types = SortedMap(),
+      instances = SortedMap(),
+      enums = SortedMap()
     )
     placeholder.name = typeName
     placeholder

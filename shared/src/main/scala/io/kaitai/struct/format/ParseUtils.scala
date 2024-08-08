@@ -26,7 +26,7 @@ object ParseUtils {
       case Some(value) =>
         asStr(value, path ++ List(field))
       case None =>
-        throw KSYParseError.noKey(path ++ List(field))
+        throw KSYParseError.noKey(field, path)
     }
   }
 
@@ -35,7 +35,7 @@ object ParseUtils {
       case Some(value) =>
         asMapStrStr(value, path ++ List(field))
       case None =>
-        throw KSYParseError.noKey(path ++ List(field))
+        throw KSYParseError.noKey(field, path)
     }
   }
 
@@ -72,6 +72,15 @@ object ParseUtils {
     }
   }
 
+  def getOptValueByte(src: Map[String, Any], field: String, path: List[String]): Option[Int] = {
+    getOptValueInt(src, field, path).map { value =>
+      if (value < 0 || value > 255) {
+        throw KSYParseError.withText(s"expected an integer from 0 to 255, got ${value}", path ++ List(field))
+      }
+      value
+    }
+  }
+
   def getValueIdentifier(src: Map[String, Any], idx: Int, entityName: String, path: List[String]): Identifier = {
     getOptValueStr(src, "id", path) match {
       case Some(idStr) =>
@@ -90,7 +99,7 @@ object ParseUtils {
       Expressions.parse(getValueStr(src, field, path))
     } catch {
       case epe: Expressions.ParseException =>
-        throw KSYParseError.expression(epe, path)
+        throw KSYParseError.expression(epe, path ++ List(field))
     }
   }
 
@@ -99,7 +108,7 @@ object ParseUtils {
       getOptValueStr(src, field, path).map(Expressions.parse)
     } catch {
       case epe: Expressions.ParseException =>
-        throw KSYParseError.expression(epe, path)
+        throw KSYParseError.expression(epe, path ++ List(field))
     }
   }
 
@@ -111,7 +120,7 @@ object ParseUtils {
     * is converted using `convertFunc` function. Lack of "field" key
     * results in an empty list.
     *
-    * @param src YAML map to get list from
+    * @param src YAML map to get list from
     * @param field key name in YAML map, value expected to be a list
     * @param convertFunc function that gets element of Any type, expected
     *                    to check its type and do the conversion
@@ -143,7 +152,7 @@ object ParseUtils {
   /**
     * Gets a list of strings from a given YAML map's key "field",
     * reporting errors accurately and ensuring type safety.
-    * @param src YAML map to get list from
+    * @param src YAML map to get list from
     * @param field key name in YAML map, value expected to be a list
     * @param path path used to report YAML errors
     * @return list of strings from YAML map

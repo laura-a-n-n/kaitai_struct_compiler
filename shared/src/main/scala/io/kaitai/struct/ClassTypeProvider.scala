@@ -19,6 +19,10 @@ class ClassTypeProvider(classSpecs: ClassSpecs, var topClass: ClassSpec) extends
     determineType(nowClass, attrName)
   }
 
+  override def determineType(attrId: Identifier): DataType = {
+    determineType(nowClass, attrId)
+  }
+
   override def determineType(inClass: ClassSpec, attrName: String): DataType = {
     attrName match {
       case Identifier.ROOT =>
@@ -42,13 +46,29 @@ class ClassTypeProvider(classSpecs: ClassSpecs, var topClass: ClassSpec) extends
     }
   }
 
+  override def determineType(inClass: ClassSpec, attrId: Identifier): DataType = {
+    attrId match {
+      case _: NumberedIdentifier =>
+        // only 'seq' fields can be unnamed (numbered)
+        inClass.seq.foreach { el =>
+          if (el.id == attrId)
+            return el.dataTypeComposite
+        }
+      case NamedIdentifier(name) => return determineType(inClass, name)
+      case InstanceIdentifier(name) => return determineType(inClass, name)
+      case SpecialIdentifier(name) => return determineType(inClass, name)
+      case _ => // do nothing
+    }
+    throw new FieldNotFoundError(attrId.humanReadable, inClass)
+  }
+
   /**
     * Attempts to resolve a member (seq attribute, parameter, instance) by given name.
     * @param inClass type specification to search member in
     * @param attrName name of a member to search for
     * @return member spec if found, or throws an exception
-    * @throws InvalidIdentifier if attribute name is not a valid name for a member
-    * @throws FieldNotFoundError if attribute with such name is not found
+    * @throws format.InvalidIdentifier if attribute name is not a valid name for a member
+    * @throws precompile.FieldNotFoundError if attribute with such name is not found
     */
   def resolveMember(inClass: ClassSpec, attrName: String): MemberSpec = {
     inClass.seq.foreach { el =>

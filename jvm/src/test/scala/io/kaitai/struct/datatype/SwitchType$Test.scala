@@ -3,15 +3,17 @@ package io.kaitai.struct.datatype
 import io.kaitai.struct.datatype.DataType.SwitchType
 import io.kaitai.struct.exprlang.Expressions
 import io.kaitai.struct.format.ClassSpec
-import org.scalatest.FunSpec
-import org.scalatest.Matchers._
+import org.scalatest.funspec.AnyFunSpec
+import org.scalatest.matchers.should.Matchers._
 
-class SwitchType$Test extends FunSpec {
+import scala.collection.immutable.SortedMap
+
+class SwitchType$Test extends AnyFunSpec {
   describe("SwitchType.parseSwitch") {
     it ("combines ints properly") {
       val t = SwitchType(
         Expressions.parse("foo"),
-        Map(
+        SortedMap(
           Expressions.parse("1") -> DataType.IntMultiType(true, DataType.Width2, Some(LittleEndian)),
           Expressions.parse("2") -> DataType.IntMultiType(false, DataType.Width4, Some(LittleEndian))
         )
@@ -28,7 +30,7 @@ class SwitchType$Test extends FunSpec {
 
       val t = SwitchType(
         Expressions.parse("foo"),
-        Map(
+        SortedMap(
           Expressions.parse("1") -> ut1,
           Expressions.parse("2") -> ut2
         )
