@@ -698,7 +698,7 @@ class JavaScriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
 
     val stmt = dataType match {
       case t: ReadableType =>
-        s"$io.write${Utils.capitalize(t.apiCall(defEndian))}();"
+        s"$io.write${Utils.capitalize(t.apiCall(defEndian))}($expr);"
       case BitsType1(bitEndian) =>
         s"$io.$io.writeBitsInt${Utils.upperCamelCase(bitEndian.toSuffix)}(1, ${translator.boolToInt(valueExpr)})"
       case BitsType(width: Int, bitEndian) =>
@@ -714,7 +714,7 @@ class JavaScriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
 
   override def attrUserTypeInstreamWrite(io: String, valueExpr: Ast.expr, dataType: DataType, exprType: DataType) = {
     val expr = expression(valueExpr)
-    out.puts(s"$expr._writeSeq($io)")
+    out.puts(s"$expr._write__seq($io)")
   }
 
   override def exprStreamToByteArray(io: String): String =
