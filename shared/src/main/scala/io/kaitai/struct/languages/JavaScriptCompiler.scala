@@ -108,13 +108,17 @@ class JavaScriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts(s"_ = this.${publicMemberName(instName)}")
   }
 
-  override def writeHeader(endian: Option[FixedEndian], isEmpty: Boolean) = {
-    val suffix = endian match {
-      case Some(e) => "_" + Utils.upperCamelCase(e.toSuffix)
-      case None => ""
+  override def writeHeader(endian: Option[FixedEndian], isEmpty: Boolean): Unit = {
+    out.puts
+    endian match {
+      case Some(e) =>
+        out.puts(s"${type2class(typeProvider.nowClass.name.last)}.prototype._write__seq${Utils.upperCamelCase(e.toSuffix)} = function() {")
+        out.inc
+      case None =>
+        out.puts(s"${type2class(typeProvider.nowClass.name.last)}.prototype._write__seq = function(io) {")
+        out.inc
+        out.puts("this._io = io;")
     }
-    out.puts(s"${type2class(typeProvider.nowClass.name.last)}.prototype._write__seq$suffix = function() {")
-    out.inc
   }
 
   override def checkHeader(): Unit = {
@@ -377,7 +381,7 @@ class JavaScriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
         case _ =>
           ""
       }).getOrElse("")
-    out.puts(s"function handler(parent, $subIO=$subIO$processValArg) {")
+    out.puts(s"const handler = (parent) => {")
     out.inc
 
     inSubIOWriteBackHandler = true
@@ -389,7 +393,7 @@ class JavaScriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     inSubIOWriteBackHandler = false
     out.puts("}")
     out.dec
-    out.puts(s"$subIO.writeBackHandler = $kstreamName.WriteBackHandler(_pos2, handler)")
+    out.puts(s"$subIO.writeBackHandler = $kstreamName.prototype.WriteBackHandler(_pos2, handler)")
   }
 
   override def addChildIO(io: String, childIO: String): Unit =
