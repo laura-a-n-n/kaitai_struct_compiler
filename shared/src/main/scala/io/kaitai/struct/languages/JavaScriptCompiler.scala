@@ -259,14 +259,7 @@ class JavaScriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def attributeReader(attrName: Identifier, attrType: DataType, isNullable: Boolean): Unit = {}
 
   override def attributeSetter(attrName: Identifier, attrType: DataType, isNullable: Boolean): Unit = {
-    if (attrName.isInstanceOf[InstanceIdentifier]) {
-      val name = publicMemberName(attrName)
-
-      // todo implement setter
-      // out.inc
-      // handleAssignmentSimple(attrName, "v")
-      // out.dec
-    }
+    // todo
   }
 
   override def attrSetProperty(base: Ast.expr, propName: Identifier, value: String): Unit = {
@@ -274,11 +267,11 @@ class JavaScriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   }
 
   override def attrUnprocess(proc: ProcessExpr, varSrc: Identifier, varDest: Identifier, rep: RepeatSpec, dt: BytesType, exprTypeOpt: Option[DataType]): Unit = {
-    // todo handleAssignment
+    // todo
   }
 
   override def attrUnprocessPrepareBeforeSubIOHandler(proc: ProcessExpr, varSrc: Identifier): Unit = {
-    // todo handleAssignment
+    // todo
   }
 
 
@@ -803,6 +796,12 @@ class JavaScriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def instanceHeader(className: List[String], instName: InstanceIdentifier, dataType: DataType, isNullable: Boolean): Unit = {
     out.puts(s"Object.defineProperty(${type2class(className.last)}.prototype, '${publicMemberName(instName)}', {")
     out.inc
+    out.puts
+    out.puts("set: function(v) {");
+    out.inc
+    out.puts(s"this._m_${publicMemberName(instName)} = v;") // wtf
+    out.dec
+    out.puts("},")
     out.puts("get: function() {")
     out.inc
   }
