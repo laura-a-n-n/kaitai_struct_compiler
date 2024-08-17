@@ -386,7 +386,7 @@ class JavaScriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     inSubIOWriteBackHandler = false
     out.puts("}")
     out.dec
-    out.puts(s"$subIO.writeBackHandler = $kstreamName.prototype.WriteBackHandler(_pos2, handler)")
+    out.puts(s"$subIO.writeBackHandler = $kstreamName.WriteBackHandler(_pos2, handler)")
   }
 
   override def addChildIO(io: String, childIO: String): Unit =
