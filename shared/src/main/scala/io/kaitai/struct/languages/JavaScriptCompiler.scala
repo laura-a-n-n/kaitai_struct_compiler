@@ -666,7 +666,7 @@ class JavaScriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def instanceCheckWriteFlagAndWrite(instName: InstanceIdentifier): Unit = {
     out.puts(s"if (this._should_write_${publicMemberName(instName)}) {")
     out.inc
-    out.puts(s"this._write_${publicMemberName(instName)}()")
+    out.puts(s"this._write_${publicMemberName(instName)}();")
     out.dec
     out.puts("}")
   }
@@ -675,8 +675,7 @@ class JavaScriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts
     out.puts(s"${type2class(typeProvider.nowClass.name.last)}.prototype._invalidate_${publicMemberName(instName)} = function() {")
     out.inc
-    // out.puts(s"delete ${privateMemberName(instName)}")
-    // ???
+    out.puts(s"delete ${privateMemberName(instName)};")
     out.dec
     out.puts("}")
   }
