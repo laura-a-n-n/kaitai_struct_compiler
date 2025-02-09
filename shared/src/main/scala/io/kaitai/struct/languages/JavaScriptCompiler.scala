@@ -149,7 +149,7 @@ class JavaScriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
 
   override def checkInstanceHeader(instName: InstanceIdentifier): Unit = {
     out.puts
-    out.puts(s"${type2class(typeProvider.nowClass.name.last)}.prototype._check${publicMemberName(instName)} = function() {")
+    out.puts(s"${type2class(typeProvider.nowClass.name.last)}.prototype._check_${publicMemberName(instName)} = function() {")
     out.inc
     instanceClearWriteFlag(instName)
   }
