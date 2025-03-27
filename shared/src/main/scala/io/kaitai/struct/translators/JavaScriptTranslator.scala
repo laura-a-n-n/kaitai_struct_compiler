@@ -109,6 +109,8 @@ class JavaScriptTranslator(provider: TypeProvider) extends BaseTranslator(provid
 
   override def bytesToStr(bytesExpr: String, encoding: String): String =
     s"""${JavaScriptCompiler.kstreamName}.bytesToStr($bytesExpr, "$encoding")"""
+  override def bytesIndexOf(b: expr, byte: expr): String =
+    s"${JavaScriptCompiler.kstreamName}.bytesIndexOf(${translate(b)}, ${doCast(byte, Int1Type(true))})"
 
   override def strLength(s: expr): String =
     s"${translate(s)}.length"
@@ -119,6 +121,11 @@ class JavaScriptTranslator(provider: TypeProvider) extends BaseTranslator(provid
 
   override def strSubstring(s: expr, from: expr, to: expr): String =
     s"${translate(s)}.substring(${translate(from)}, ${translate(to)})"
+
+  // this does not work for different encodings bc TextEncoder doesn't take an
+  // argument
+  override def strToBytes(s: Ast.expr, encoding: Ast.expr): String =
+    s"""${JavaScriptCompiler.kstreamName}.strToBytes($s, "$encoding")"""
 
   override def arrayFirst(a: expr): String =
     s"${translate(a)}[0]"
