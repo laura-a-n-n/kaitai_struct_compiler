@@ -265,6 +265,8 @@ class PerlCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     handleAssignmentRepeatEos(id, expr)
 
   override def condRepeatUntilHeader(id: Identifier, io: String, dataType: DataType, untilExpr: expr): Unit = {
+    blockScopeHeader
+    out.puts(s"my ${translator.doName("_")};")
     out.puts("do {")
     out.inc
   }
@@ -283,10 +285,20 @@ class PerlCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     typeProvider._currentIteratorType = Some(dataType)
     out.dec
     out.puts(s"} until (${expression(untilExpr)});")
+    blockScopeFooter
   }
 
   override def handleAssignmentSimple(id: Identifier, expr: String): Unit =
     out.puts(s"${privateMemberName(id)} = $expr;")
+
+  override def handleAssignmentTempVar(dataType: DataType, id: String, expr: String): Unit =
+    out.puts(s"my $id = $expr;")
+
+  override def blockScopeHeader: Unit = {
+    out.puts("{")
+    out.inc
+  }
+  override def blockScopeFooter: Unit = universalFooter
 
   override def parseExpr(dataType: DataType, assignType: DataType, io: String, defEndian: Option[FixedEndian]): String = {
     dataType match {
@@ -341,6 +353,30 @@ class PerlCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
       case None => expr1
     }
     expr2
+  }
+
+  override def userTypeDebugRead(id: String, dataType: DataType, assignType: DataType): Unit =
+    out.puts(s"$id->_read();")
+
+  override def tryFinally(tryBlock: () => Unit, finallyBlock: () => Unit): Unit = {
+    out.puts("my ($failed, $err);")
+    out.puts("eval {")
+    out.inc
+    tryBlock()
+    out.puts("1;")
+    out.dec
+    out.puts("} or do {")
+    out.inc
+    out.puts("$failed = 1;")
+    out.puts("$err = $@;")
+    out.dec
+    out.puts("};")
+    finallyBlock()
+    out.puts("if ($failed) {")
+    out.inc
+    out.puts("die $err;")
+    out.dec
+    out.puts("}")
   }
 
   override def switchStart(id: Identifier, on: Ast.expr): Unit = {}

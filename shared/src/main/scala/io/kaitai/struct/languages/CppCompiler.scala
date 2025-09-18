@@ -749,6 +749,20 @@ class CppCompiler(
     outSrc.puts(s"$expr->_read();")
   }
 
+  override def tryFinally(tryBlock: () => Unit, finallyBlock: () => Unit): Unit = {
+    outSrc.puts("try {")
+    outSrc.inc
+    tryBlock()
+    outSrc.dec
+    outSrc.puts("} catch(...) {")
+    outSrc.inc
+    finallyBlock()
+    outSrc.puts("throw;")
+    outSrc.dec
+    outSrc.puts("}")
+    finallyBlock()
+  }
+
   override def switchRequiresIfs(onType: DataType): Boolean = onType match {
     case _: IntType | _: EnumType => false
     case _ => true
@@ -893,6 +907,44 @@ class CppCompiler(
 
     outHdr.dec
     outHdr.puts("};")
+
+    outHdr.puts(s"static bool _is_defined_$enumClass($enumClass v);")
+    importListHdr.addSystem("set")
+    val inClassRef = types2class(curClass)
+    val enumClassAbs = s"$inClassRef::$enumClass"
+    val valuesSetAbsRef = s"$inClassRef::_values_$enumClass"
+    ensureMode(PrivateAccess)
+    // NOTE: declaration and definition must be separate in this case,
+    // see https://stackoverflow.com/a/12856069
+    outHdr.puts(s"static const std::set<$enumClass> _values_$enumClass;")
+    if (config.cppConfig.useListInitializers) {
+      outSrc.puts(s"const std::set<$enumClassAbs> $valuesSetAbsRef{")
+      outSrc.inc
+      enumColl.foreach { case (_, label) =>
+        outSrc.puts(s"$inClassRef::${value2Const(enumName, label.name)},")
+      }
+      outSrc.dec
+      outSrc.puts("};")
+    } else {
+      outHdr.puts(s"static std::set<$enumClass> _build_values_$enumClass();")
+
+      outSrc.puts(s"std::set<$enumClassAbs> $inClassRef::_build_values_$enumClass() {")
+      outSrc.inc
+      outSrc.puts(s"std::set<$enumClassAbs> _t;")
+      enumColl.foreach { case (_, label) =>
+        outSrc.puts(s"_t.insert($inClassRef::${value2Const(enumName, label.name)});")
+      }
+      outSrc.puts("return _t;")
+      outSrc.dec
+      outSrc.puts("}")
+      outSrc.puts(s"const std::set<$enumClassAbs> $valuesSetAbsRef = $inClassRef::_build_values_$enumClass();")
+    }
+    ensureMode(PublicAccess)
+    outSrc.puts(s"bool $inClassRef::_is_defined_$enumClass($enumClassAbs v) {")
+    outSrc.inc
+    outSrc.puts(s"return $valuesSetAbsRef.find(v) != $valuesSetAbsRef.end();")
+    outSrc.dec
+    outSrc.puts("}")
   }
 
   override def classToString(toStringExpr: Ast.expr): Unit = {
@@ -1007,21 +1059,37 @@ class CppCompiler(
         case _: ValidationLessThanError => "validation_less_than_error"
         case _: ValidationGreaterThanError => "validation_greater_than_error"
         case _: ValidationNotAnyOfError => "validation_not_any_of_error"
+        case _: ValidationNotInEnumError => "validation_not_in_enum_error"
         case _: ValidationExprError => "validation_expr_error"
       }
       s"kaitai::$cppErrName<$cppType>"
   }
 
   override def attrValidateExpr(
-    attrId: Identifier,
-    attrType: DataType,
+    attr: AttrLikeSpec,
     checkExpr: Ast.expr,
     err: KSError,
     errArgs: List[Ast.expr]
+  ): Unit =
+    attrValidate(s"!(${translator.translate(checkExpr)})", err, errArgs)
+
+  override def attrValidateInEnum(
+    attr: AttrLikeSpec,
+    et: EnumType,
+    valueExpr: Ast.expr,
+    err: ValidationNotInEnumError,
+    errArgs: List[Ast.expr]
   ): Unit = {
+    val enumSpec = et.enumSpec.get
+    val inClassRef = types2class(enumSpec.name.dropRight(1))
+    val enumNameStr = type2class(enumSpec.name.last)
+    attrValidate(s"!$inClassRef::_is_defined_$enumNameStr(${translator.translate(valueExpr)})", err, errArgs)
+  }
+
+  private def attrValidate(failCondExpr: String, err: KSError, errArgs: List[Ast.expr]): Unit = {
     val errArgsStr = errArgs.map(translator.translate).mkString(", ")
     importListSrc.addKaitai("kaitai/exceptions.h")
-    outSrc.puts(s"if (!(${translator.translate(checkExpr)})) {")
+    outSrc.puts(s"if ($failCondExpr) {")
     outSrc.inc
     outSrc.puts(s"throw ${ksErrorName(err)}($errArgsStr);")
     outSrc.dec

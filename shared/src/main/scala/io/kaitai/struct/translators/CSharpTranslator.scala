@@ -9,6 +9,22 @@ import io.kaitai.struct.format.{EnumSpec, Identifier}
 import io.kaitai.struct.languages.CSharpCompiler
 
 class CSharpTranslator(provider: TypeProvider, importList: ImportList) extends BaseTranslator(provider) {
+  override def translate(v: Ast.expr, extPrec: Int): String = {
+    val expr = super.translate(v, extPrec)
+    v match {
+      case Ast.expr.UnaryOp(op: Ast.unaryop, inner: Ast.expr) =>
+        if (extPrec == METHOD_PRECEDENCE) {
+          // This is needed so that `(-2).to_s` and `(~12).to_s` are not incorrectly
+          // translated as `-2.ToString()` and `~12.ToString()`.
+          s"($expr)"
+        } else {
+          expr
+        }
+      case _ =>
+        expr
+    }
+  }
+
   override def doArrayLiteral(t: DataType, value: Seq[expr]): String = {
     val nativeType = CSharpCompiler.kaitaiType2NativeType(importList, t)
     val commaStr = value.map((v) => translate(v)).mkString(", ")
@@ -38,7 +54,7 @@ class CSharpTranslator(provider: TypeProvider, importList: ImportList) extends B
 
   override def strLiteralGenericCC(code: Char): String = strLiteralUnicode(code)
 
-  override def genericBinOp(left: Ast.expr, op: Ast.operator, right: Ast.expr, extPrec: Int) = {
+  override def genericBinOp(left: Ast.expr, op: Ast.binaryop, right: Ast.expr, extPrec: Int) = {
     (detectType(left), detectType(right), op) match {
       case (_: IntType, _: IntType, Ast.operator.Mod) =>
         s"${CSharpCompiler.kstreamName}.Mod(${translate(left)}, ${translate(right)})"
@@ -71,17 +87,15 @@ class CSharpTranslator(provider: TypeProvider, importList: ImportList) extends B
     CSharpCompiler.types2class(enumTypeRel)
   }
 
-  override def doStrCompareOp(left: Ast.expr, op: Ast.cmpop, right: Ast.expr) = {
-    if (op == Ast.cmpop.Eq) {
-      s"${translate(left)} == ${translate(right)}"
-    } else if (op == Ast.cmpop.NotEq) {
-      s"${translate(left)} != ${translate(right)}"
+  override def doStrCompareOp(left: Ast.expr, op: Ast.cmpop, right: Ast.expr, extPrec: Int) = {
+    if (op == Ast.cmpop.Eq || op == Ast.cmpop.NotEq) {
+      super.doStrCompareOp(left, op, right, extPrec)
     } else {
       s"(${translate(left)}.CompareTo(${translate(right)}) ${cmpOp(op)} 0)"
     }
   }
 
-  override def doBytesCompareOp(left: Ast.expr, op: Ast.cmpop, right: Ast.expr): String =
+  override def doBytesCompareOp(left: Ast.expr, op: Ast.cmpop, right: Ast.expr, extPrec: Int): String =
     s"(${CSharpCompiler.kstreamName}.ByteArrayCompare(${translate(left)}, ${translate(right)}) ${cmpOp(op)} 0)"
 
   override def arraySubscript(container: expr, idx: expr): String =
@@ -97,7 +111,16 @@ class CSharpTranslator(provider: TypeProvider, importList: ImportList) extends B
     s"Convert.ToInt64(${translate(s)}, ${translate(base)})"
   }
   override def enumToInt(v: expr, et: EnumType): String =
-    translate(v)
+    // Always casting to `int` works fine at the time of writing this, because the
+    // enums we generate for C# are `int`-based (we generate `public enum $enumClass
+    // { ... }`, see `CSharpCompiler.enumDeclaration`, and according to
+    // <https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/builtin-types/enum>:
+    // "By default, the associated constant values of enum members are of type
+    // `int`").
+    //
+    // However, once we start generating enums with underlying types other than
+    // `int`, we will have to change this.
+    s"((int) ${translate(v, METHOD_PRECEDENCE)})"
   override def floatToInt(v: expr): String =
     s"(long) (${translate(v)})"
   override def intToStr(i: expr): String =

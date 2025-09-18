@@ -56,9 +56,9 @@ class TranslatorSpec extends AnyFunSpec {
       everybody("-2147483647", "-2147483647")
       // -0x8000_0000
       everybodyExcept("-2147483648", "-2147483648", ResultMap(
-        CppCompiler -> "-2147483647 - 1",
-        LuaCompiler -> "-2147483647 - 1",
-        PHPCompiler -> "-2147483647 - 1",
+        CppCompiler -> "(-2147483647 - 1)",
+        LuaCompiler -> "(-2147483647 - 1)",
+        PHPCompiler -> "(-2147483647 - 1)",
       ))
       // -0x8000_0001
       everybodyExcept("-2147483649", "-2147483649", ResultMap(
@@ -79,7 +79,7 @@ class TranslatorSpec extends AnyFunSpec {
         GoCompiler -> "uint64(9223372036854775808)",
         JavaCompiler -> "0x8000000000000000L",
         LuaCompiler -> "0x8000000000000000",
-        PHPCompiler -> "-9223372036854775807 - 1",
+        PHPCompiler -> "(-9223372036854775807 - 1)",
       ))
       // 0xffff_ffff_ffff_ffff
       everybodyExcept("18446744073709551615", "18446744073709551615", ResultMap(
@@ -97,11 +97,11 @@ class TranslatorSpec extends AnyFunSpec {
       ))
       // -0x8000_0000_0000_0000
       everybodyExcept("-9223372036854775808", "-9223372036854775808", ResultMap(
-        CppCompiler -> "-9223372036854775807LL - 1",
+        CppCompiler -> "(-9223372036854775807LL - 1)",
         GoCompiler -> "int64(-9223372036854775808)",
         JavaCompiler -> "-9223372036854775808L",
-        LuaCompiler -> "-9223372036854775807 - 1",
-        PHPCompiler -> "-9223372036854775807 - 1",
+        LuaCompiler -> "(-9223372036854775807 - 1)",
+        PHPCompiler -> "(-9223372036854775807 - 1)",
       ))
     }
   }
@@ -159,9 +159,17 @@ class TranslatorSpec extends AnyFunSpec {
       PythonCompiler -> "3 - ((1 + 2) // (7 * 8) + 5)"
     ))
 
-    everybody("1 + 2 << 5", "1 + 2 << 5")
-    everybody("(1 + 2) << 5", "1 + 2 << 5")
-    everybody("1 + (2 << 5)", "1 + (2 << 5)")
+    everybodyExcept("1 + 2 << 5", "1 + 2 << 5", ResultMap(
+      GoCompiler -> "(1 + 2) << 5"
+    ))
+
+    everybodyExcept("(1 + 2) << 5", "1 + 2 << 5", ResultMap(
+      GoCompiler -> "(1 + 2) << 5"
+    ))
+
+    everybodyExcept("1 + (2 << 5)", "1 + (2 << 5)", ResultMap(
+      GoCompiler -> "1 + 2 << 5"
+    ))
 
     everybodyExcept("~777", "~777", ResultMap(
       GoCompiler -> "^777"
@@ -175,11 +183,26 @@ class TranslatorSpec extends AnyFunSpec {
     everybodyExcept("(0b01 & 0b10) >> 1", "(1 & 2) >> 1", ResultMap(
       JavaScriptCompiler -> "(1 & 2) >>> 1"
     ))
+
+    everybodyExcept("3 | 1 ^ 2", "3 | 1 ^ 2", ResultMap(
+      GoCompiler -> "3 | (1 ^ 2)",
+      LuaCompiler -> "3 | 1 ~ 2",
+      PerlCompiler -> "3 | (1 ^ 2)",
+      RubyCompiler -> "3 | (1 ^ 2)"
+    ))
   }
 
   describe("integer comparisons") {
     everybody("1 < 2", "1 < 2", CalcBooleanType)
     everybody("1 == 2", "1 == 2", CalcBooleanType)
+
+    everybodyExcept("100 & 1 == 0", "(100 & 1) == 0", ResultMap(
+      GoCompiler -> "100 & 1 == 0",
+      LuaCompiler -> "100 & 1 == 0",
+      PythonCompiler -> "100 & 1 == 0",
+      RubyCompiler -> "100 & 1 == 0",
+      RustCompiler -> "100 & 1 == 0",
+    ), CalcBooleanType)
   }
 
   describe("integer method calls") {
@@ -406,7 +429,7 @@ class TranslatorSpec extends AnyFunSpec {
         CSharpCompiler -> "new byte[] { 34, 0, 10, 64, 65, 66, 92 }",
         GoCompiler -> "[]uint8{34, 0, 10, 64, 65, 66, 92}",
         JavaCompiler -> "new byte[] { 34, 0, 10, 64, 65, 66, 92 }",
-        JavaScriptCompiler -> "[34, 0, 10, 64, 65, 66, 92]",
+        JavaScriptCompiler -> "new Uint8Array([34, 0, 10, 64, 65, 66, 92])",
         LuaCompiler -> "\"\\034\\000\\010\\064\\065\\066\\092\"",
         PerlCompiler -> "pack('C*', (34, 0, 10, 64, 65, 66, 92))",
         PHPCompiler -> "\"\\x22\\x00\\x0A\\x40\\x41\\x42\\x5C\"",
@@ -419,7 +442,7 @@ class TranslatorSpec extends AnyFunSpec {
         CSharpCompiler -> "new byte[] { 255, 0, 255 }",
         GoCompiler -> "[]uint8{255, 0, 255}",
         JavaCompiler -> "new byte[] { -1, 0, -1 }",
-        JavaScriptCompiler -> "[255, 0, 255]",
+        JavaScriptCompiler -> "new Uint8Array([255, 0, 255])",
         LuaCompiler -> "\"\\255\\000\\255\"",
         PerlCompiler -> "pack('C*', (255, 0, 255))",
         PHPCompiler -> "\"\\xFF\\x00\\xFF\"",
@@ -434,7 +457,7 @@ class TranslatorSpec extends AnyFunSpec {
         CSharpCompiler -> "new byte[] { 0, 1, 2 }.Length",
         GoCompiler -> "len([]uint8{0, 1, 2})",
         JavaCompiler -> "new byte[] { 0, 1, 2 }.length",
-        JavaScriptCompiler -> "[0, 1, 2].length",
+        JavaScriptCompiler -> "new Uint8Array([0, 1, 2]).length",
         LuaCompiler -> "#\"\\000\\001\\002\"",
         PerlCompiler -> "length(pack('C*', (0, 1, 2)))",
         PHPCompiler -> "strlen(\"\\x00\\x01\\x02\")",
@@ -461,7 +484,7 @@ class TranslatorSpec extends AnyFunSpec {
         GoCompiler -> "this.A[42 - 2]",
         JavaCompiler -> "a().get((int) (42 - 2))",
         JavaScriptCompiler -> "this.a[42 - 2]",
-        LuaCompiler -> "self.a[42 - 2 + 1]", // TODO: self.a[41]
+        LuaCompiler -> "self.a[(42 - 2) + 1]", // TODO: self.a[41]
         PerlCompiler -> "@{$self->a()}[42 - 2]",
         PHPCompiler -> "$this->a()[42 - 2]",
         PythonCompiler -> "self.a[42 - 2]",
@@ -576,7 +599,7 @@ class TranslatorSpec extends AnyFunSpec {
       ), CalcStrType)
 
       everybodyExcept("\"str1\" == \"str2\"", "\"str1\" == \"str2\"", ResultMap(
-        CppCompiler -> "std::string(\"str1\") == (std::string(\"str2\"))",
+        CppCompiler -> "std::string(\"str1\") == std::string(\"str2\")",
         JavaCompiler -> "\"str1\".equals(\"str2\")",
         LuaCompiler -> "\"str1\" == \"str2\"",
         PerlCompiler -> "\"str1\" eq \"str2\"",
@@ -585,7 +608,7 @@ class TranslatorSpec extends AnyFunSpec {
 
       everybodyExcept("\"str1\" != \"str2\"", "\"str1\" != \"str2\"", ResultMap(
         CppCompiler -> "std::string(\"str1\") != std::string(\"str2\")",
-        JavaCompiler -> "!(\"str1\").equals(\"str2\")",
+        JavaCompiler -> "!\"str1\".equals(\"str2\")",
         LuaCompiler -> "\"str1\" ~= \"str2\"",
         PerlCompiler -> "\"str1\" ne \"str2\"",
         PythonCompiler -> "u\"str1\" != u\"str2\""
@@ -701,7 +724,7 @@ class TranslatorSpec extends AnyFunSpec {
         PerlCompiler -> "substr(\"foobar\", 2, 4 - 2)",
         PHPCompiler -> "\\Kaitai\\Struct\\Stream::substring(\"foobar\", 2, 4)",
         PythonCompiler -> "u\"foobar\"[2:4]",
-        RubyCompiler -> "\"foobar\"[2..4 - 1]"
+        RubyCompiler -> "\"foobar\"[2...4]"
       ))
 
       // substring() call on concatenation of strings: for some languages, concatenation needs to be
@@ -716,7 +739,7 @@ class TranslatorSpec extends AnyFunSpec {
         PerlCompiler -> "substr($self->foo() . $self->bar(), 2, 4 - 2)",
         PHPCompiler -> "\\Kaitai\\Struct\\Stream::substring($this->foo() . $this->bar(), 2, 4)",
         PythonCompiler -> "(self.foo + self.bar)[2:4]",
-        RubyCompiler -> "(foo + bar)[2..4 - 1]"
+        RubyCompiler -> "(foo + bar)[2...4]"
       ))
 
       // substring() call with non-left-associative "from" and "to": for languages where subtraction
@@ -731,7 +754,7 @@ class TranslatorSpec extends AnyFunSpec {
         PerlCompiler -> "substr($self->foo(), 10 - 7, (10 - 3) - (10 - 7))", // TODO: PerlCompiler -> "substr($self->foo(), 10 - 7, 10 - 3 - (10 - 7))",
         PHPCompiler -> "\\Kaitai\\Struct\\Stream::substring($this->foo(), 10 - 7, 10 - 3)",
         PythonCompiler -> "self.foo[10 - 7:10 - 3]",
-        RubyCompiler -> "foo[10 - 7..(10 - 3) - 1]" // TODO: RubyCompiler -> "foo[10 - 7..10 - 3 - 1]"
+        RubyCompiler -> "foo[10 - 7...10 - 3]"
       ))
 
       // substring() call with "to" using `<<` which is lower precedence than `+` or `-`: if such
@@ -746,7 +769,7 @@ class TranslatorSpec extends AnyFunSpec {
         PerlCompiler -> "substr($self->foo(), 10 - 7, (10 << 2) - (10 - 7))",
         PHPCompiler -> "\\Kaitai\\Struct\\Stream::substring($this->foo(), 10 - 7, 10 << 2)",
         PythonCompiler -> "self.foo[10 - 7:10 << 2]",
-        RubyCompiler -> "foo[10 - 7..(10 << 2) - 1]"
+        RubyCompiler -> "foo[10 - 7...10 << 2]"
       ))
 
       // substring() call with "from" using `<<` which is lower precedence than `+` or `-`: if such
@@ -761,7 +784,7 @@ class TranslatorSpec extends AnyFunSpec {
         PerlCompiler -> "substr($self->foo(), 10 << 1, 42 - (10 << 1))",
         PHPCompiler -> "\\Kaitai\\Struct\\Stream::substring($this->foo(), 10 << 1, 42)",
         PythonCompiler -> "self.foo[10 << 1:42]",
-        RubyCompiler -> "foo[10 << 1..42 - 1]"
+        RubyCompiler -> "foo[10 << 1...42]"
       ))
     }
   }
@@ -816,7 +839,7 @@ class TranslatorSpec extends AnyFunSpec {
         CSharpCompiler -> "new byte[] {  }",
         GoCompiler -> "[]uint8{}",
         JavaCompiler -> "new byte[] {  }",
-        JavaScriptCompiler -> "[]",
+        JavaScriptCompiler -> "new Uint8Array([])",
         LuaCompiler -> "\"\"",
         PerlCompiler -> "pack('C*', ())",
         PHPCompiler -> "\"\"",
@@ -854,12 +877,12 @@ class TranslatorSpec extends AnyFunSpec {
     describe("to do type enforcement") {
       // type enforcement: casting to non-literal byte array
       full("[0 + 1, 5].as<bytes>", CalcIntType, CalcBytesType, ResultMap(
-        CppCompiler -> "???",
+        CppCompiler -> "std::string({static_cast<char>(0 + 1), static_cast<char>(5)})",
         CSharpCompiler -> "new byte[] { 0 + 1, 5 }",
         GoCompiler -> "[]uint8{0 + 1, 5}",
         JavaCompiler -> "new byte[] { 0 + 1, 5 }",
         JavaScriptCompiler -> "new Uint8Array([0 + 1, 5])",
-        LuaCompiler -> "???",
+        LuaCompiler -> "string.char(0 + 1, 5)",
         PerlCompiler -> "pack('C*', (0 + 1, 5))",
         PHPCompiler -> "pack('C*', 0 + 1, 5)",
         PythonCompiler -> "struct.pack('2B', 0 + 1, 5)",

@@ -1,7 +1,7 @@
 package io.kaitai.struct.languages
 
 import io.kaitai.struct.datatype.DataType._
-import io.kaitai.struct.datatype.{CalcEndian, DataType, FixedEndian, InheritedEndian, KSError, UndecidedEndiannessError}
+import io.kaitai.struct.datatype.{CalcEndian, DataType, FixedEndian, InheritedEndian, KSError, UndecidedEndiannessError, ValidationNotInEnumError}
 import io.kaitai.struct.exprlang.Ast
 import io.kaitai.struct.format.{NoRepeat, RepeatEos, RepeatExpr, RepeatSpec, _}
 import io.kaitai.struct.languages.components._
@@ -117,8 +117,8 @@ class PHPCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts(
       s"public function __construct($paramsArg" +
       s"$tIo $pIo, " +
-      s"$tParent $pParent = null, " +
-      s"$tRoot $pRoot = null" + endianAdd + ") {"
+      s"?$tParent $pParent = null, " +
+      s"?$tRoot $pRoot = null" + endianAdd + ") {"
     )
     out.inc
     out.puts(s"parent::__construct($pIo, $pParent, $pRootValue);")
@@ -392,6 +392,18 @@ class PHPCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def userTypeDebugRead(id: String, dataType: DataType, assignType: DataType): Unit =
     out.puts(s"$id->_read();")
 
+  override def tryFinally(tryBlock: () => Unit, finallyBlock: () => Unit): Unit = {
+    out.puts("try {")
+    out.inc
+    tryBlock()
+    out.dec
+    out.puts("} finally {")
+    out.inc
+    finallyBlock()
+    out.dec
+    out.puts("}")
+  }
+
   override def switchStart(id: Identifier, on: Ast.expr): Unit = {
     val onType = translator.detectType(on)
 
@@ -439,6 +451,15 @@ class PHPCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
       universalDoc(label.doc)
       out.puts(s"const ${value2Const(label.name)} = ${translator.doIntLiteral(id)};")
     }
+    out.puts
+    val arrayEntriesStr = enumColl.map { case (id, _) => s"${translator.doIntLiteral(id)} => true" }.mkString(", ")
+    out.puts(s"private const _VALUES = [$arrayEntriesStr];")
+    out.puts
+    out.puts("public static function isDefined(int $v): bool {")
+    out.inc
+    out.puts("return isset(self::_VALUES[$v]);")
+    out.dec
+    out.puts("}")
     classFooter(name)
   }
 
@@ -495,14 +516,28 @@ class PHPCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def ksErrorName(err: KSError): String = PHPCompiler.ksErrorName(err)
 
   override def attrValidateExpr(
-    attrId: Identifier,
-    attrType: DataType,
+    attr: AttrLikeSpec,
     checkExpr: Ast.expr,
     err: KSError,
     errArgs: List[Ast.expr]
+  ): Unit =
+    attrValidate(s"!(${translator.translate(checkExpr)})", err, errArgs)
+
+  override def attrValidateInEnum(
+    attr: AttrLikeSpec,
+    et: EnumType,
+    valueExpr: Ast.expr,
+    err: ValidationNotInEnumError,
+    errArgs: List[Ast.expr]
   ): Unit = {
+    val enumSpec = et.enumSpec.get
+    val enumRef = translator.types2classAbs(enumSpec.name)
+    attrValidate(s"!$enumRef::isDefined(${translator.translate(valueExpr)})", err, errArgs)
+  }
+
+  private def attrValidate(failCondExpr: String, err: KSError, errArgs: List[Ast.expr]): Unit = {
     val errArgsStr = errArgs.map(translator.translate).mkString(", ")
-    out.puts(s"if (!(${translator.translate(checkExpr)})) {")
+    out.puts(s"if ($failCondExpr) {")
     out.inc
     out.puts(s"throw new ${ksErrorName(err)}($errArgsStr);")
     out.dec

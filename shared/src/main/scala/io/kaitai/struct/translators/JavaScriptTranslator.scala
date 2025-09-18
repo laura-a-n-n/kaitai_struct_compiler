@@ -8,6 +8,8 @@ import io.kaitai.struct.format.{EnumSpec, Identifier}
 import io.kaitai.struct.languages.JavaScriptCompiler
 
 class JavaScriptTranslator(provider: TypeProvider, importList: ImportList) extends BaseTranslator(provider) {
+  override def doByteArrayLiteral(arr: Seq[Byte]): String =
+    s"new Uint8Array([${arr.map(_ & 0xff).mkString(", ")}])"
   override def doByteArrayNonLiteral(elts: Seq[Ast.expr]): String =
     s"new Uint8Array([${elts.map(translate).mkString(", ")}])"
 
@@ -24,7 +26,7 @@ class JavaScriptTranslator(provider: TypeProvider, importList: ImportList) exten
   override def strLiteralGenericCC(code: Char): String =
     "\\x%02x".format(code.toInt)
 
-  override def genericBinOp(left: Ast.expr, op: Ast.operator, right: Ast.expr, extPrec: Int) = {
+  override def genericBinOp(left: Ast.expr, op: Ast.binaryop, right: Ast.expr, extPrec: Int) = {
     (detectType(left), detectType(right), op) match {
       case (_: IntType, _: IntType, Ast.operator.Div) =>
         s"Math.floor(${super.genericBinOp(left, op, right, 0)})"
@@ -68,7 +70,7 @@ class JavaScriptTranslator(provider: TypeProvider, importList: ImportList) exten
     // Just an integer, without any casts / resolutions - one would have to look up constants manually
     id
 
-  override def doBytesCompareOp(left: Ast.expr, op: Ast.cmpop, right: Ast.expr): String =
+  override def doBytesCompareOp(left: Ast.expr, op: Ast.cmpop, right: Ast.expr, extPrec: Int): String =
     s"(${JavaScriptCompiler.kstreamName}.byteArrayCompare(${translate(left)}, ${translate(right)}) ${cmpOp(op)} 0)"
 
   override def arraySubscript(container: expr, idx: expr): String =
@@ -89,7 +91,7 @@ class JavaScriptTranslator(provider: TypeProvider, importList: ImportList) exten
     * accepted as one of the fastest (other top methods are +-0.3%), and it's
     * pretty concise and readable.
     *
-    * @see http://stackoverflow.com/questions/7820683/convert-boolean-result-into-number-integer
+    * @see https://stackoverflow.com/questions/7820683/convert-boolean-result-into-number-integer
     * @param v boolean expression to convert
     * @return string rendition of conversion
     */
@@ -102,7 +104,7 @@ class JavaScriptTranslator(provider: TypeProvider, importList: ImportList) exten
     * relatively easy to add compatibility polyfill for non-supporting environments
     * (see MDN page).
     *
-    * @see http://stackoverflow.com/a/596503/487064
+    * @see https://stackoverflow.com/a/596503/487064
     * @see https://developer.mozilla.org/en/docs/Web/JavaScript/Reference/Global_Objects/Math/trunc
     * @param v float expression to convert
     * @return string rendition of conversion
@@ -119,7 +121,7 @@ class JavaScriptTranslator(provider: TypeProvider, importList: ImportList) exten
   override def strLength(s: expr): String =
     s"${translate(s, METHOD_PRECEDENCE)}.length"
 
-  // http://stackoverflow.com/a/36525647/2055163
+  // https://stackoverflow.com/a/36525647/2055163
   override def strReverse(s: expr): String =
     s"Array.from(${translate(s)}).reverse().join('')"
 

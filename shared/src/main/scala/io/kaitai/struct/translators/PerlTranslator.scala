@@ -8,7 +8,28 @@ import io.kaitai.struct.format.{EnumSpec, Identifier}
 import io.kaitai.struct.languages.PerlCompiler
 
 class PerlTranslator(provider: TypeProvider, importList: ImportList) extends BaseTranslator(provider) {
-  // http://perldoc.perl.org/perlrebackslash.html#Character-Escapes
+  /**
+  * @see https://perldoc.perl.org/perlop#Operator-Precedence-and-Associativity
+  */
+  override val OPERATOR_PRECEDENCE = Map[Ast.binaryop, Int](
+    Ast.operator.Mult -> 130,
+    Ast.operator.Div -> 130,
+    Ast.operator.Mod -> 130,
+    Ast.operator.Add -> 120,
+    Ast.operator.Sub -> 120,
+    Ast.operator.LShift -> 110,
+    Ast.operator.RShift -> 110,
+    Ast.cmpop.Lt -> 100,
+    Ast.cmpop.LtE -> 100,
+    Ast.cmpop.Gt -> 100,
+    Ast.cmpop.GtE -> 100,
+    Ast.cmpop.Eq -> 90,
+    Ast.cmpop.NotEq -> 90,
+    Ast.operator.BitAnd -> 80,
+    Ast.operator.BitXor -> 70,
+    Ast.operator.BitOr -> 70
+  )
+  // https://perldoc.perl.org/perlrebackslash#Character-Escapes
   override val asciiCharQuoteMap: Map[Char, String] = Map(
     '\t' -> "\\t",
     '\n' -> "\\n",
@@ -34,7 +55,7 @@ class PerlTranslator(provider: TypeProvider, importList: ImportList) extends Bas
   override def strLiteralUnicode(code: Char): String =
     "\\N{U+%04x}".format(code.toInt)
 
-  override def genericBinOp(left: Ast.expr, op: Ast.operator, right: Ast.expr, extPrec: Int) = {
+  override def genericBinOp(left: Ast.expr, op: Ast.binaryop, right: Ast.expr, extPrec: Int) = {
     (detectType(left), detectType(right), op) match {
       case (_: IntType, _: IntType, Ast.operator.Div) =>
         s"int(${super.genericBinOp(left, op, right, 0)})"
@@ -58,15 +79,15 @@ class PerlTranslator(provider: TypeProvider, importList: ImportList) extends Bas
 
   override def doLocalName(s: String) = {
     s match {
-      case "_" | "_on" => "$" + s
-      case Identifier.INDEX => doName(s)
+      case Identifier.SWITCH_ON => "$_on"
+      case Identifier.ITERATOR | Identifier.INDEX => doName(s)
       case _ => s"$$self->${doName(s)}"
     }
   }
 
   override def doName(s: String) = {
     s match {
-      case Identifier.ITERATOR => "$_"
+      case Identifier.ITERATOR => "$_it"
       case Identifier.ITERATOR2 => "$_buf"
       case Identifier.INDEX => "$i"
       case _ => s"$s()"
@@ -95,7 +116,7 @@ class PerlTranslator(provider: TypeProvider, importList: ImportList) extends Bas
     enumTypeRel.map((x) => Utils.upperCamelCase(x)).mkString(".")
   }
 
-  override def doStrCompareOp(left: Ast.expr, op: Ast.cmpop, right: Ast.expr) = {
+  override def doStrCompareOp(left: Ast.expr, op: Ast.cmpop, right: Ast.expr, extPrec: Int) = {
     val opStr = op match {
       case Ast.cmpop.Eq => "eq"
       case Ast.cmpop.NotEq => "ne"
@@ -104,11 +125,11 @@ class PerlTranslator(provider: TypeProvider, importList: ImportList) extends Bas
       case Ast.cmpop.Gt => "gt"
       case Ast.cmpop.GtE => "ge"
     }
-    s"${translate(left)} $opStr ${translate(right)}"
+    super.genericBinOpStr(left, op, opStr, right, extPrec)
   }
 
-  override def doBytesCompareOp(left: Ast.expr, op: Ast.cmpop, right: Ast.expr): String =
-    doStrCompareOp(left, op, right)
+  override def doBytesCompareOp(left: Ast.expr, op: Ast.cmpop, right: Ast.expr, extPrec: Int): String =
+    doStrCompareOp(left, op, right, extPrec)
 
   override def arraySubscript(container: Ast.expr, idx: Ast.expr): String =
     s"@{${translate(container)}}[${translate(idx)}]"
@@ -126,7 +147,7 @@ class PerlTranslator(provider: TypeProvider, importList: ImportList) extends Bas
       case "8" =>
         s"oct(${translate(s)})"
       case "10" =>
-        s"${translate(s)} + 0"
+        s"(${translate(s)} + 0)"
       case "16" =>
         s"hex(${translate(s)})"
       case _ => throw new UnsupportedOperationException(baseStr)

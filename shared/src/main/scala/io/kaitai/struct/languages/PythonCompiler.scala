@@ -408,6 +408,17 @@ class PythonCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def userTypeDebugRead(id: String, dataType: DataType, assignType: DataType): Unit =
     out.puts(s"$id._read()")
 
+  override def tryFinally(tryBlock: () => Unit, finallyBlock: () => Unit): Unit = {
+    out.puts("try:")
+    out.inc
+    tryBlock()
+    out.dec
+    out.puts("finally:")
+    out.inc
+    finallyBlock()
+    out.dec
+  }
+
   override def switchStart(id: Identifier, on: Ast.expr): Unit = {}
   override def switchCaseStart(condition: Ast.expr): Unit = {}
   override def switchCaseEnd(): Unit = {}
@@ -498,14 +509,28 @@ class PythonCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def ksErrorName(err: KSError): String = PythonCompiler.ksErrorName(err)
 
   override def attrValidateExpr(
-    attrId: Identifier,
-    attrType: DataType,
+    attr: AttrLikeSpec,
     checkExpr: Ast.expr,
     err: KSError,
     errArgs: List[Ast.expr]
+  ): Unit =
+    attrValidate(s"not ${translator.translate(checkExpr)}", err, errArgs)
+
+  override def attrValidateInEnum(
+    attr: AttrLikeSpec,
+    et: EnumType,
+    valueExpr: Ast.expr,
+    err: ValidationNotInEnumError,
+    errArgs: List[Ast.expr]
   ): Unit = {
+    val enumSpec = et.enumSpec.get
+    val enumRef = types2class(enumSpec.name, enumSpec.isExternal(typeProvider.nowClass))
+    attrValidate(s"not isinstance(${translator.translate(valueExpr)}, $enumRef)", err, errArgs)
+  }
+
+  private def attrValidate(failCondExpr: String, err: KSError, errArgs: List[Ast.expr]): Unit = {
     val errArgsStr = errArgs.map(translator.translate).mkString(", ")
-    out.puts(s"if not ${translator.translate(checkExpr)}:")
+    out.puts(s"if $failCondExpr:")
     out.inc
     out.puts(s"raise ${ksErrorName(err)}($errArgsStr)")
     out.dec

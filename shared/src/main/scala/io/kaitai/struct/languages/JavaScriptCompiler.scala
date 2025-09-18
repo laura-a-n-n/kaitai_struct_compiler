@@ -161,13 +161,13 @@ class JavaScriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def attributeReader(attrName: Identifier, attrType: DataType, isNullable: Boolean): Unit = {}
 
   override def universalDoc(doc: DocSpec): Unit = {
-    // JSDoc docstring style: http://usejsdoc.org/about-getting-started.html
+    // JSDoc docstring style: https://jsdoc.app/about-getting-started
     out.puts
     out.puts( "/**")
 
     doc.summary.foreach(summary => out.putsLines(" * ", summary))
 
-    // http://usejsdoc.org/tags-see.html
+    // https://jsdoc.app/tags-see
     doc.ref.foreach {
       case TextRef(text) =>
         out.putsLines(" * ", s"@see $text")
@@ -420,6 +420,18 @@ class JavaScriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts(s"$id._read();")
   }
 
+  override def tryFinally(tryBlock: () => Unit, finallyBlock: () => Unit): Unit = {
+    out.puts("try {")
+    out.inc
+    tryBlock()
+    out.dec
+    out.puts("} finally {")
+    out.inc
+    finallyBlock()
+    out.dec
+    out.puts("}")
+  }
+
   override def switchRequiresIfs(onType: DataType): Boolean = onType match {
     case _: IntType | _: BooleanType | _: EnumType | _: StrType => false
     case _ => true
@@ -582,18 +594,32 @@ class JavaScriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def ksErrorName(err: KSError): String = JavaScriptCompiler.ksErrorName(err)
 
   override def attrValidateExpr(
-    attrId: Identifier,
-    attrType: DataType,
+    attr: AttrLikeSpec,
     checkExpr: Ast.expr,
     err: KSError,
     errArgs: List[Ast.expr]
+  ): Unit =
+    attrValidate(s"!(${translator.translate(checkExpr)})", attr, err, errArgs)
+
+  override def attrValidateInEnum(
+    attr: AttrLikeSpec,
+    et: EnumType,
+    valueExpr: Ast.expr,
+    err: ValidationNotInEnumError,
+    errArgs: List[Ast.expr]
   ): Unit = {
+    val enumSpec = et.enumSpec.get
+    val enumRef = types2class(enumSpec.name, enumSpec.isExternal(typeProvider.nowClass))
+    attrValidate(s"!Object.prototype.hasOwnProperty.call($enumRef, ${translator.translate(valueExpr)})", attr, err, errArgs)
+  }
+
+  private def attrValidate(failCondExpr: String, attr: AttrLikeSpec, err: KSError, errArgs: List[Ast.expr]): Unit = {
     val errArgsStr = errArgs.map(translator.translate).mkString(", ")
-    out.puts(s"if (!(${translator.translate(checkExpr)})) {")
+    out.puts(s"if ($failCondExpr) {")
     out.inc
     val errObj = s"new ${ksErrorName(err)}($errArgsStr)"
-    if (attrDebugNeeded(attrId)) {
-      val debugName = attrDebugName(attrId, NoRepeat, true)
+    if (attrDebugNeeded(attr.id)) {
+      val debugName = attrDebugName(attr.id, attr.cond.repeat, true)
       out.puts(s"var _err = $errObj;")
       out.puts(s"$debugName.validationError = _err;")
       out.puts("throw _err;")

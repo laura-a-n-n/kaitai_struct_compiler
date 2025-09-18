@@ -1,7 +1,7 @@
 package io.kaitai.struct.languages
 
 import io.kaitai.struct.{ClassTypeProvider, RuntimeConfig, Utils, ExternalType}
-import io.kaitai.struct.datatype.{DataType, FixedEndian, InheritedEndian, KSError, ValidationNotEqualError}
+import io.kaitai.struct.datatype.{DataType, FixedEndian, InheritedEndian, KSError, ValidationNotEqualError, ValidationNotInEnumError}
 import io.kaitai.struct.datatype.DataType._
 import io.kaitai.struct.exprlang.Ast
 import io.kaitai.struct.format._
@@ -376,6 +376,20 @@ class LuaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def userTypeDebugRead(id: String, dataType: DataType, assignType: DataType): Unit =
     out.puts(s"$id:_read()")
 
+  override def tryFinally(tryBlock: () => Unit, finallyBlock: () => Unit): Unit = {
+    out.puts("local success, err = pcall(function()")
+    out.inc
+    tryBlock()
+    out.dec
+    out.puts("end)")
+    finallyBlock()
+    out.puts("if not success then")
+    out.inc
+    out.puts("error(err)")
+    out.dec
+    out.puts("end")
+  }
+
   override def switchStart(id: Identifier, on: Ast.expr): Unit = {}
   override def switchCaseStart(condition: Ast.expr): Unit = {}
   override def switchCaseEnd(): Unit = {}
@@ -421,14 +435,29 @@ class LuaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def ksErrorName(err: KSError): String = LuaCompiler.ksErrorName(err)
 
   override def attrValidateExpr(
-    attrId: Identifier,
-    attrType: DataType,
+    attr: AttrLikeSpec,
     checkExpr: Ast.expr,
     err: KSError,
     errArgs: List[Ast.expr]
+  ): Unit =
+    attrValidate(s"not(${translator.translate(checkExpr)})", err, errArgs)
+
+  override def attrValidateInEnum(
+    attr: AttrLikeSpec,
+    et: EnumType,
+    valueExpr: Ast.expr,
+    err: ValidationNotInEnumError,
+    errArgs: List[Ast.expr]
   ): Unit = {
+    // NOTE: this condition works for now because we haven't implemented
+    // https://github.com/kaitai-io/kaitai_struct/issues/778 for Lua yet, but
+    // it will need to be changed when we do.
+    attrValidate(s"${translator.translate(valueExpr)} == nil", err, errArgs)
+  }
+
+  private def attrValidate(failCondExpr: String, err: KSError, errArgs: List[Ast.expr]): Unit = {
     val errArgsCode = errArgs.map(translator.translate)
-    out.puts(s"if not(${translator.translate(checkExpr)}) then")
+    out.puts(s"if $failCondExpr then")
     out.inc
     val msg = err match {
       case _: ValidationNotEqualError => {

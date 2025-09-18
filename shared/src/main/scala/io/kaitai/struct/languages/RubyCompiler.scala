@@ -422,6 +422,18 @@ class RubyCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def userTypeDebugRead(id: String, dataType: DataType, assignType: DataType): Unit =
     out.puts(s"$id._read")
 
+  override def tryFinally(tryBlock: () => Unit, finallyBlock: () => Unit): Unit = {
+    out.puts("begin")
+    out.inc
+    tryBlock()
+    out.dec
+    out.puts("ensure")
+    out.inc
+    finallyBlock()
+    out.dec
+    out.puts("end")
+  }
+
   override def switchStart(id: Identifier, on: Ast.expr): Unit =
     out.puts(s"case ${expression(on)}")
 
@@ -497,14 +509,27 @@ class RubyCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def ksErrorName(err: KSError): String = RubyCompiler.ksErrorName(err)
 
   override def attrValidateExpr(
-    attrId: Identifier,
-    attrType: DataType,
+    attr: AttrLikeSpec,
     checkExpr: Ast.expr,
     err: KSError,
     errArgs: List[Ast.expr]
+  ): Unit =
+    attrValidate(s"not ${translator.translate(checkExpr)}", err, errArgs)
+
+  override def attrValidateInEnum(
+    attr: AttrLikeSpec,
+    et: EnumType,
+    valueExpr: Ast.expr,
+    err: ValidationNotInEnumError,
+    errArgs: List[Ast.expr]
   ): Unit = {
+    val inverseMap = translator.enumInverseMap(et)
+    attrValidate(s"not ${inverseMap}.key?(${translator.translate(valueExpr)})", err, errArgs)
+  }
+
+  private def attrValidate(failCondExpr: String, err: KSError, errArgs: List[Ast.expr]): Unit = {
     val errArgsStr = errArgs.map(translator.translate).mkString(", ")
-    out.puts(s"raise ${ksErrorName(err)}.new($errArgsStr) if not ${translator.translate(checkExpr)}")
+    out.puts(s"raise ${ksErrorName(err)}.new($errArgsStr) if $failCondExpr")
   }
 
   def types2class(names: List[String]) = names.map(type2class).mkString("::")

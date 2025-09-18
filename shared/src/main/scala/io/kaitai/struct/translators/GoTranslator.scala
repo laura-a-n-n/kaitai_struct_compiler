@@ -28,6 +28,28 @@ class GoTranslator(out: StringLanguageOutputWriter, provider: TypeProvider, impo
 
   var returnRes: Option[String] = None
 
+  /**
+  * @see https://go.dev/ref/spec#Operator_precedence
+  */
+  override val OPERATOR_PRECEDENCE = Map[Ast.binaryop, Int](
+    Ast.operator.Mult -> 130,
+    Ast.operator.Div -> 130,
+    Ast.operator.Mod -> 130,
+    Ast.operator.LShift -> 130,
+    Ast.operator.RShift -> 130,
+    Ast.operator.BitAnd -> 130,
+    Ast.operator.Add -> 120,
+    Ast.operator.Sub -> 120,
+    Ast.operator.BitXor -> 120,
+    Ast.operator.BitOr -> 120,
+    Ast.cmpop.Lt -> 110,
+    Ast.cmpop.LtE -> 110,
+    Ast.cmpop.Gt -> 110,
+    Ast.cmpop.GtE -> 110,
+    Ast.cmpop.Eq -> 110,
+    Ast.cmpop.NotEq -> 110
+  )
+
   override def translate(v: Ast.expr, extPrec: Int): String = resToStr(translateExpr(v, extPrec))
 
   def resToStr(r: TranslatorResult): String = r match {
@@ -76,15 +98,15 @@ class GoTranslator(out: StringLanguageOutputWriter, provider: TypeProvider, impo
       case Ast.expr.Compare(left, op, right) =>
         (detectType(left), detectType(right)) match {
           case (_: NumericType, _: NumericType) =>
-            trNumericCompareOp(left, op, right)
+            trNumericCompareOp(left, op, right, extPrec)
           case (_: StrType, _: StrType) =>
-            trStrCompareOp(left, op, right)
+            trStrCompareOp(left, op, right, extPrec)
           case (_: BytesType, _: BytesType) =>
             trBytesCompareOp(left, op, right)
           case (_: BooleanType, _: BooleanType) =>
-            trNumericCompareOp(left, op, right)
+            trNumericCompareOp(left, op, right, extPrec)
           case (_: EnumType, _: EnumType) =>
-            trNumericCompareOp(left, op, right)
+            trNumericCompareOp(left, op, right, extPrec)
           case (ltype, rtype) =>
             throw new TypeMismatchError(s"can't do $ltype $op $rtype")
         }
@@ -145,7 +167,7 @@ class GoTranslator(out: StringLanguageOutputWriter, provider: TypeProvider, impo
     (detectType(left), detectType(right), op) match {
       case (t1: IntType, t2: IntType, Ast.operator.Mod) =>
         val v1 = allocateLocalVar()
-        out.puts(s"${localVarName(v1)} := ${translate(left)} % ${translate(right)}")
+        out.puts(s"${localVarName(v1)} := ${genericBinOp(left, Ast.operator.Mod, right, 0)}")
         out.puts(s"if ${localVarName(v1)} < 0 {")
         out.inc
         out.puts(s"${localVarName(v1)} += ${translate(right)}")
@@ -160,11 +182,11 @@ class GoTranslator(out: StringLanguageOutputWriter, provider: TypeProvider, impo
   def trStrConcat(left: Ast.expr, right: Ast.expr, extPrec: Int): TranslatorResult =
     ResultString(genericBinOp(left, Ast.operator.Add, right, extPrec))
 
-  def trNumericCompareOp(left: Ast.expr, op: Ast.cmpop, right: Ast.expr): TranslatorResult =
-    ResultString(doNumericCompareOp(left, op, right))
+  def trNumericCompareOp(left: Ast.expr, op: Ast.cmpop, right: Ast.expr, extPrec: Int): TranslatorResult =
+    ResultString(doNumericCompareOp(left, op, right, extPrec))
 
-  def trStrCompareOp(left: Ast.expr, op: Ast.cmpop, right: Ast.expr): TranslatorResult =
-    ResultString(doStrCompareOp(left, op, right))
+  def trStrCompareOp(left: Ast.expr, op: Ast.cmpop, right: Ast.expr, extPrec: Int): TranslatorResult =
+    ResultString(doStrCompareOp(left, op, right, extPrec))
 
   def trBytesCompareOp(left: Ast.expr, op: Ast.cmpop, right: Ast.expr): TranslatorResult = {
     importList.add("bytes")
@@ -258,7 +280,7 @@ class GoTranslator(out: StringLanguageOutputWriter, provider: TypeProvider, impo
   def trEnumById(enumTypeAbs: List[String], id: String) =
     ResultString(s"${types2class(enumTypeAbs)}($id)")
 
-  override def doBytesCompareOp(left: Ast.expr, op: Ast.cmpop, right: Ast.expr): String = {
+  override def doBytesCompareOp(left: Ast.expr, op: Ast.cmpop, right: Ast.expr, extPrec: Int): String = {
     op match {
       case Ast.cmpop.Eq =>
         s"Arrays.equals(${translate(left)}, ${translate(right)})"
@@ -285,15 +307,41 @@ class GoTranslator(out: StringLanguageOutputWriter, provider: TypeProvider, impo
   val IMPORT_CHARMAP = "golang.org/x/text/encoding/charmap"
 
   val ENCODINGS = Map(
-    "IBM437" -> ("charmap.CodePage437", IMPORT_CHARMAP),
-    "ISO-8859-1" -> ("charmap.ISO8859_1", IMPORT_CHARMAP),
-    "ISO-8859-2" -> ("charmap.ISO8859_2", IMPORT_CHARMAP),
-    "ISO-8859-3" -> ("charmap.ISO8859_3", IMPORT_CHARMAP),
-    "ISO-8859-4" -> ("charmap.ISO8859_4", IMPORT_CHARMAP),
-    "SJIS" -> ("japanese.ShiftJIS", "golang.org/x/text/encoding/japanese"),
-    "BIG5" -> ("traditionalchinese.Big5", "golang.org/x/text/encoding/traditionalchinese"),
+    "UTF-16BE" -> ("unicode.UTF16(unicode.BigEndian, unicode.IgnoreBOM)", "golang.org/x/text/encoding/unicode"),
     "UTF-16LE" -> ("unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM)", "golang.org/x/text/encoding/unicode"),
-    "UTF-16BE" -> ("unicode.UTF16(unicode.BigEndian, unicode.IgnoreBOM)", "golang.org/x/text/encoding/unicode")
+    "UTF-32BE" -> ("utf32.UTF32(utf32.BigEndian, utf32.IgnoreBOM)", "golang.org/x/text/encoding/unicode/utf32"),
+    "UTF-32LE" -> ("utf32.UTF32(utf32.LittleEndian, utf32.IgnoreBOM)", "golang.org/x/text/encoding/unicode/utf32"),
+    "ISO-8859-1"  -> ("charmap.ISO8859_1", IMPORT_CHARMAP),
+    "ISO-8859-2"  -> ("charmap.ISO8859_2", IMPORT_CHARMAP),
+    "ISO-8859-3"  -> ("charmap.ISO8859_3", IMPORT_CHARMAP),
+    "ISO-8859-4"  -> ("charmap.ISO8859_4", IMPORT_CHARMAP),
+    "ISO-8859-5"  -> ("charmap.ISO8859_5", IMPORT_CHARMAP),
+    "ISO-8859-6"  -> ("charmap.ISO8859_6", IMPORT_CHARMAP),
+    "ISO-8859-7"  -> ("charmap.ISO8859_7", IMPORT_CHARMAP),
+    "ISO-8859-8"  -> ("charmap.ISO8859_8", IMPORT_CHARMAP),
+    "ISO-8859-9"  -> ("charmap.ISO8859_9", IMPORT_CHARMAP),
+    "ISO-8859-10" -> ("charmap.ISO8859_10", IMPORT_CHARMAP),
+    // The same note as in https://github.com/kaitai-io/kaitai_struct_cpp_stl_runtime/blob/07ff9cf91e8bdf3515c0efdda0a879c0021b5edb/kaitai/kaitaistream.cpp#L918-L922
+    // applies here
+    "ISO-8859-11" -> ("charmap.Windows874", IMPORT_CHARMAP),
+    "ISO-8859-13" -> ("charmap.ISO8859_13", IMPORT_CHARMAP),
+    "ISO-8859-14" -> ("charmap.ISO8859_14", IMPORT_CHARMAP),
+    "ISO-8859-15" -> ("charmap.ISO8859_15", IMPORT_CHARMAP),
+    "ISO-8859-16" -> ("charmap.ISO8859_16", IMPORT_CHARMAP),
+    "windows-1250" -> ("charmap.Windows1250", IMPORT_CHARMAP),
+    "windows-1251" -> ("charmap.Windows1251", IMPORT_CHARMAP),
+    "windows-1252" -> ("charmap.Windows1252", IMPORT_CHARMAP),
+    "windows-1253" -> ("charmap.Windows1253", IMPORT_CHARMAP),
+    "windows-1254" -> ("charmap.Windows1254", IMPORT_CHARMAP),
+    "windows-1255" -> ("charmap.Windows1255", IMPORT_CHARMAP),
+    "windows-1256" -> ("charmap.Windows1256", IMPORT_CHARMAP),
+    "windows-1257" -> ("charmap.Windows1257", IMPORT_CHARMAP),
+    "windows-1258" -> ("charmap.Windows1258", IMPORT_CHARMAP),
+    "IBM437" -> ("charmap.CodePage437", IMPORT_CHARMAP),
+    "IBM866" -> ("charmap.CodePage866", IMPORT_CHARMAP),
+    "Shift_JIS" -> ("japanese.ShiftJIS", "golang.org/x/text/encoding/japanese"),
+    "Big5" -> ("traditionalchinese.Big5", "golang.org/x/text/encoding/traditionalchinese"),
+    "EUC-KR" -> ("korean.EUCKR", "golang.org/x/text/encoding/korean"),
   )
 
   override def bytesToStr(value: Ast.expr, encoding: String): TranslatorResult =
@@ -447,25 +495,6 @@ class GoTranslator(out: StringLanguageOutputWriter, provider: TypeProvider, impo
     out.puts(s"${localVarName(v)} = 1")
     out.dec
     out.puts("}")
-    ResultLocalVar(v)
-  }
-
-  def userType(t: UserType, io: String) = {
-    val v = allocateLocalVar()
-    val (parent, root) = if (t.isExternal(provider.nowClass)) {
-      ("nil", "nil")
-    } else {
-      val parent = t.forcedParent match {
-        case Some(USER_TYPE_NO_PARENT) => "nil"
-        case Some(fp) => translate(fp)
-        case None => "this"
-      }
-      (parent, "this._root")
-    }
-    val addParams = t.args.map((a) => translate(a)).mkString(", ")
-    out.puts(s"${localVarName(v)} := New${GoCompiler.types2class(t.classSpec.get.name)}($addParams)")
-    out.puts(s"err = ${localVarName(v)}.Read($io, $parent, $root)")
-    outAddErrCheck()
     ResultLocalVar(v)
   }
 

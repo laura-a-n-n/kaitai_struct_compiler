@@ -523,6 +523,18 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts(s"$expr._read();")
   }
 
+  override def tryFinally(tryBlock: () => Unit, finallyBlock: () => Unit): Unit = {
+    out.puts("try {")
+    out.inc
+    tryBlock()
+    out.dec
+    out.puts("} finally {")
+    out.inc
+    finallyBlock()
+    out.dec
+    out.puts("}")
+  }
+
   override def switchCasesRender[T](
     id: Identifier,
     on: Ast.expr,
@@ -779,14 +791,29 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   }
 
   override def attrValidateExpr(
-    attrId: Identifier,
-    attrType: DataType,
+    attr: AttrLikeSpec,
     checkExpr: Ast.expr,
     err: KSError,
     errArgs: List[Ast.expr]
+  ): Unit =
+    attrValidate(s"!(${translator.translate(checkExpr)})", err, errArgs)
+
+  override def attrValidateInEnum(
+    attr: AttrLikeSpec,
+    et: EnumType,
+    valueExpr: Ast.expr,
+    err: ValidationNotInEnumError,
+    errArgs: List[Ast.expr]
   ): Unit = {
+    // NOTE: this condition works for now because we haven't implemented
+    // https://github.com/kaitai-io/kaitai_struct/issues/778 for Java yet, but
+    // it will need to be changed when we do.
+    attrValidate(s"${translator.translate(valueExpr)} == null", err, errArgs)
+  }
+
+  private def attrValidate(failCondExpr: String, err: KSError, errArgs: List[Ast.expr]): Unit = {
     val errArgsStr = errArgs.map(translator.translate).mkString(", ")
-    out.puts(s"if (!(${translator.translate(checkExpr)})) {")
+    out.puts(s"if ($failCondExpr) {")
     out.inc
     out.puts(s"throw new ${ksErrorName(err)}($errArgsStr);")
     out.dec
