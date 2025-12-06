@@ -61,11 +61,13 @@ class TypescriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     importList.add(className)
   }
 
+  var inNamespace = false;
   def beginNamespace(names: List[String]): Unit = {
     names.zipWithIndex.foreach { case (name, i) =>
       out.puts(s"${if (i == 0) "declare " else  ""}namespace ${type2class(name)} {")
       out.inc
     }
+    inNamespace = true;
   }
 
   def endNamespace(names: List[String]): Unit = {
@@ -73,11 +75,14 @@ class TypescriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
       out.dec
       out.puts("}")
     }
+    inNamespace = false;
   }
 
   override def classHeader(name: List[String]): Unit = {
     val namespace = name.init
-    beginNamespace(namespace)
+    if (!inNamespace) {
+      beginNamespace(namespace);
+    }
 
     val shortClassName = type2class(name.last)
 
@@ -154,6 +159,11 @@ class TypescriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def universalDoc(doc: DocSpec): Unit = {
     // JSDoc docstring style: http://usejsdoc.org/about-getting-started.html
     out.puts
+
+    if (!inNamespace) {
+      beginNamespace(typeProvider.nowClass.name.init)
+    }
+
     out.puts("/**")
 
     doc.summary.foreach(summary => out.putsLines(" * ", summary))
@@ -175,7 +185,9 @@ class TypescriptCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def handleAssignmentTempVar(dataType: DataType, id: String, expr: String): Unit = {}
 
   override def enumDeclaration(curClass: List[String], enumName: String, enumColl: Seq[(Long, EnumValueSpec)]): Unit = {
-    beginNamespace(curClass)
+    if (!inNamespace) {
+      beginNamespace(curClass);
+    }
 
     out.puts(s"enum ${type2class(enumName)} {")
     out.inc
